@@ -1,0 +1,13 @@
+# Fixture for the licence gate: Syft lists these references as components
+# without licences; the gate must skip them (self-check runs it on testdata/go).
+name: fixture
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  fixture:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
