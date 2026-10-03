@@ -6,6 +6,8 @@ name: self-check
 
 on:
   pull_request:
+    # edited: a fixed PR title reruns the names gate.
+    types: [opened, edited, synchronize, reopened]
   push:
     branches: [master]
 

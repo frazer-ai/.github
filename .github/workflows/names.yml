@@ -8,6 +8,8 @@
 #                 records.
 #   PR title      On pull requests: a Conventional Commit title,
 #                 `type(scope)!: summary`. Squash merges make it the commit.
+#                 Callers add `edited` to their pull_request types so a
+#                 retitled PR is checked again.
 #
 # expect-failure: true inverts the location gate for a fixture.
 name: names
