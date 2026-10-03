@@ -15,6 +15,7 @@ workflows every repository calls. Plan: task 1a in `docs`
 | `.github/workflows/tofu-check.yml` | OpenTofu gate: fmt, init without a backend, validate, TFLint, Trivy config scan (digest-pinned, signature-verified image), `tofu test` |
 | `.github/workflows/image-build.yml` | The one image builder: ko, multi-arch; on push, provenance and SBOM attestations; signing with the OpenBao transit key |
 | `.github/workflows/scan.yml` | Security scanners: Betterleaks (git history), OSV-Scanner (lockfiles), Trivy (vulnerabilities and misconfigurations) from its digest-pinned, signature-verified image |
+| `.github/workflows/names.yml` | Naming gates: no other cloud's region IDs in tracked files, Conventional Commit PR titles |
 | `.github/workflows/license-gate.yml` | Licence gate: Syft SBOM, SPDX allow-list, exceptions file, generated NOTICE |
 | `.github/workflows/self-check.yml` | This repository's CI: lints the workflows and runs each one against `testdata/`, including fixtures that must fail (`license-bad`, `vuln`) |
 

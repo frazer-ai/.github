@@ -1,0 +1,3 @@
+# Fixture for names.yml's expect-failure run: another cloud's region ID where a
+# Frazer location belongs.
+location: us-east-1

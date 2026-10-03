@@ -1,0 +1,88 @@
+# Naming gates every repository runs (naming.md §2.8, F-703; task 1k):
+#
+#   Location IDs  Frazer's locations use a place word (us-virginia1, Q-107).
+#                 Another cloud's region ID (AWS us-east-1, GCP us-east1) in a  (names: allow)
+#                 tracked file fails, because it reads as a Frazer location.
+#                 A line that must quote one says `names: allow` with a reason;
+#                 `exclude` (an extended regex on paths) skips historical
+#                 records.
+#   PR title      On pull requests: a Conventional Commit title,
+#                 `type(scope)!: summary`. Squash merges make it the commit.
+#
+# expect-failure: true inverts the location gate for a fixture.
+name: names
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory whose tracked files are checked
+        type: string
+        default: "."
+      runs-on:
+        description: Runner label
+        type: string
+        default: ubuntu-24.04
+      exclude:
+        description: Extended regex of paths (relative to working-directory) to skip
+        type: string
+        default: ""
+      expect-failure:
+        description: Pass only if the location gate finds something (fixtures)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  locations:
+    name: Location IDs
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: No other cloud's region IDs
+        env:
+          EXCLUDE: ${{ inputs.exclude }}
+          EXPECT_FAILURE: ${{ inputs.expect-failure }}
+        run: |
+          set -uo pipefail
+          aws='(us|eu|ap|sa|ca|me|af|il|mx)-(gov-)?(north|south|east|west|central|northeast|southeast|northwest|southwest)-[0-9]'
+          gcp='(us|europe|asia|northamerica|southamerica|australia|me|africa)-(north|south|east|west|central|northeast|southeast|northwest|southwest)[0-9]'
+          pattern="(^|[^a-z0-9-])(${aws}|${gcp})([^a-z0-9-]|$)"
+          files=$(git ls-files -- . | { if [ -n "$EXCLUDE" ]; then grep -Ev "$EXCLUDE"; else cat; fi; })
+          hits=$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 -r grep -InE "$pattern" -- 2>/dev/null | grep -v 'names: allow' || true)
+          if [ "$EXPECT_FAILURE" = "true" ]; then
+            if [ -n "$hits" ]; then printf 'Found, as expected:\n%s\n' "$hits"; exit 0; fi
+            echo "::error::expected the fixture's region ID to be found"; exit 1
+          fi
+          if [ -n "$hits" ]; then
+            printf '%s\n' "$hits"
+            echo "::error::another cloud's region ID; Frazer locations are listed in frazer/naming/locations.yaml (us-virginia1). Mark an intended quote with 'names: allow'."
+            exit 1
+          fi
+          echo "No foreign region IDs."
+
+  pr-title:
+    name: PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    steps:
+      - name: Conventional Commit title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9][a-z0-9/._-]*\))?!?: [^ ].*[^.]$'
+          if printf '%s' "$TITLE" | grep -Eq "$re"; then
+            echo "OK: $TITLE"
+          else
+            echo "::error::PR title \"$TITLE\" is not a Conventional Commit: type(scope)!: summary, with type one of feat fix docs style refactor perf test build ci chore revert, and no trailing period"
+            exit 1
+          fi
