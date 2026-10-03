@@ -84,10 +84,21 @@ jobs:
       artifact-name: license-gate-bad-fixture
       expect-failure: true
 
+  scan:
+    uses: ./.github/workflows/scan.yml
+    with:
+      working-directory: testdata/go
+
+  scan-must-fail:
+    uses: ./.github/workflows/scan.yml
+    with:
+      working-directory: testdata/vuln
+      expect-failure: true
+
   required:
     name: required
     if: always()
-    needs: [workflows, go, web, tofu, image, licences, licences-must-fail]
+    needs: [workflows, go, web, tofu, image, licences, licences-must-fail, scan, scan-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

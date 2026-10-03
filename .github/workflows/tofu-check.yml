@@ -26,10 +26,18 @@ on:
         # renovate: datasource=github-releases depName=terraform-linters/tflint
         default: v0.64.0
       trivy-version:
-        description: Trivy version
+        description: Trivy version; the image digest and signing identity must match it
         type: string
-        # renovate: datasource=github-releases depName=aquasecurity/trivy
-        default: v0.75.0
+        default: 0.75.0
+      trivy-digest:
+        description: Digest of ghcr.io/aquasecurity/trivy:<trivy-version> (the multi-arch index)
+        type: string
+        default: sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+      cosign-release:
+        description: cosign version, to verify the Trivy image
+        type: string
+        # renovate: datasource=github-releases depName=sigstore/cosign
+        default: v3.1.3
       trivy-severity:
         description: Trivy severities that fail the gate
         type: string
@@ -57,10 +65,29 @@ jobs:
       - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
         with:
           tflint_version: ${{ inputs.tflint-version }}
-      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          version: ${{ inputs.trivy-version }} # zizmor: ignore[unpinned-tools] pinned by the input default
-          cache: true
+          cosign-release: ${{ inputs.cosign-release }}
+      # Trivy runs from its image pinned by digest, after cosign verifies the
+      # signature against Aqua's release workflow (as in scan.yml).
+      - name: Install Trivy (digest-pinned, signature verified)
+        env:
+          TRIVY_VERSION: ${{ inputs.trivy-version }}
+          TRIVY_DIGEST: ${{ inputs.trivy-digest }}
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/trivy-bin"
+          mkdir -p "$bin" "$RUNNER_TEMP/trivy-cache"
+          image="ghcr.io/aquasecurity/trivy@${TRIVY_DIGEST}"
+          cosign verify "$image" \
+            --certificate-identity "https://github.com/aquasecurity/trivy/.github/workflows/reusable-release.yaml@refs/tags/v${TRIVY_VERSION}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          cat > "$bin/trivy" <<SH
+          #!/usr/bin/env bash
+          exec docker run --rm -v "\$PWD:/src:ro" -w /src -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" "$image" "\$@"
+          SH
+          chmod +x "$bin/trivy"
+          echo "$bin" >> "$GITHUB_PATH"
       - name: tofu fmt
         run: tofu fmt -check -recursive -diff
       - name: tofu init and validate
