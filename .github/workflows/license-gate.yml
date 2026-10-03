@@ -1,0 +1,230 @@
+# Licence gate (plan task 1g, F-549): builds a CycloneDX SBOM of the source
+# tree with Syft and fails when a third-party component has a licence that is
+# not on the allow-list, or no licence at all. Light by design (owner,
+# 2026-10-02): permissive licences and MPL-2.0 pass; anything else needs a
+# line in the caller's exceptions file with a reason.
+#
+# It also writes NOTICE.generated.txt (every third-party component and its
+# licences) as an artifact, which the release bundle collects.
+name: license-gate
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory to scan, relative to the repository root
+        type: string
+        default: "."
+      runs-on:
+        description: Runner label
+        type: string
+        default: ubuntu-24.04
+      allow:
+        description: Space-separated SPDX IDs that pass without an exception
+        type: string
+        default: >-
+          0BSD Apache-2.0 BlueOak-1.0.0 BSD-2-Clause BSD-3-Clause BSL-1.0
+          CC-BY-4.0 CC0-1.0 ISC MIT MIT-0 MPL-2.0 Python-2.0 Unicode-3.0
+          Unicode-DFS-2016 Unlicense Zlib
+      exceptions-file:
+        description: >-
+          File (relative to the repository root) with one exception per line:
+          `<component>@<version|*> <reason>`. Missing file means no exceptions.
+        type: string
+        default: .github/license-exceptions.txt
+      syft-version:
+        description: Syft version
+        type: string
+        # renovate: datasource=github-releases depName=anchore/syft
+        default: v1.54.0
+      artifact-name:
+        description: Name of the uploaded NOTICE and SBOM artifact (unique per run)
+        type: string
+        default: license-gate
+      expect-failure:
+        description: Self-test only. Pass when the gate finds a violation.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  license-gate:
+    name: Licences
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Find Go modules
+        id: detect
+        env:
+          WD: ${{ inputs.working-directory }}
+        run: |
+          if find "$WD" -name go.mod -not -path '*/node_modules/*' | grep -q .; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Go
+        if: steps.detect.outputs.go == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      # Syft reads Go licences from the module cache, so download it first.
+      - name: Download Go modules
+        if: steps.detect.outputs.go == 'true'
+        env:
+          WD: ${{ inputs.working-directory }}
+        run: |
+          find "$WD" -name go.mod -not -path '*/node_modules/*' | while read -r mod; do
+            (cd "$(dirname "$mod")" && go mod download)
+          done
+          echo "SYFT_GOLANG_SEARCH_LOCAL_MOD_CACHE_LICENSES=true" >> "$GITHUB_ENV"
+          echo "SYFT_GOLANG_LOCAL_MOD_CACHE_DIR=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
+
+      - name: SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: ${{ inputs.working-directory }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          syft-version: ${{ inputs.syft-version }}
+          upload-artifact: false
+          dependency-snapshot: false
+
+      - name: Check licences
+        id: check
+        env:
+          WD: ${{ inputs.working-directory }}
+          ALLOW: ${{ inputs.allow }}
+          EXCEPTIONS_FILE: ${{ inputs.exceptions-file }}
+          EXPECT_FAILURE: ${{ inputs.expect-failure }}
+        shell: python
+        run: |
+          import json, os, re, subprocess, sys
+          from pathlib import Path
+
+          wd = Path(os.environ["WD"])
+          allow = set(os.environ["ALLOW"].split())
+
+          # First-party names: every Go module and package.json name in the tree.
+          first_party = set()
+          for f in wd.rglob("go.mod"):
+              if "node_modules" in f.parts:
+                  continue
+              m = re.search(r"^module\s+(\S+)", f.read_text(), re.M)
+              if m:
+                  first_party.add(m.group(1))
+          for f in wd.rglob("package.json"):
+              if "node_modules" in f.parts:
+                  continue
+              name = json.loads(f.read_text()).get("name")
+              if name:
+                  first_party.add(name)
+
+          exceptions = set()
+          ex = Path(os.environ["EXCEPTIONS_FILE"])
+          if ex.is_file():
+              for line in ex.read_text().splitlines():
+                  line = line.strip()
+                  if line and not line.startswith("#"):
+                      exceptions.add(line.split()[0])
+
+          def allowed(expr):
+              """Evaluate an SPDX expression: OR < AND < WITH, parentheses."""
+              tokens = re.findall(r"\(|\)|[^\s()]+", expr)
+              pos = 0
+
+              def peek():
+                  return tokens[pos] if pos < len(tokens) else None
+
+              def take():
+                  nonlocal pos
+                  pos += 1
+                  return tokens[pos - 1]
+
+              def atom():
+                  if peek() == "(":
+                      take()
+                      v = disj()
+                      if take() != ")":
+                          raise IndexError("unbalanced")
+                      return v
+                  ident = take()
+                  if peek() == "WITH":  # the exception only widens the base licence
+                      take()
+                      take()
+                  return ident.rstrip("+") in allow
+
+              def conj():
+                  v = atom()
+                  while peek() == "AND":
+                      take()
+                      v = atom() and v
+                  return v
+
+              def disj():
+                  v = conj()
+                  while peek() == "OR":
+                      take()
+                      v = conj() or v
+                  return v
+
+              try:
+                  return disj() and pos == len(tokens)
+              except IndexError:
+                  return False
+
+          sbom = json.loads(Path("sbom.cdx.json").read_text())
+          rows, violations = set(), 0
+          for c in sbom.get("components", []):
+              if c.get("type") not in ("library", "framework"):
+                  continue
+              name, version = c.get("name", "?"), c.get("version") or "?"
+              if name in first_party:
+                  continue
+              exprs = []
+              for l in c.get("licenses") or []:
+                  e = (l.get("license") or {}).get("id") or (l.get("license") or {}).get("name") or l.get("expression")
+                  if e:
+                      exprs.append(e)
+              licences = " AND ".join(f"({e})" if " " in e else e for e in exprs)
+              rows.add(f"{name} {version}: {licences or 'UNKNOWN'}")
+              if f"{name}@{version}" in exceptions or f"{name}@*" in exceptions:
+                  continue
+              if not licences:
+                  print(f"::error title=Unknown licence::{name} {version} has no licence in the SBOM")
+                  violations += 1
+              elif not allowed(licences):
+                  print(f"::error title=Licence not allowed::{name} {version} is {licences}")
+                  violations += 1
+
+          Path("NOTICE.generated.txt").write_text("".join(f"{r}\n" for r in sorted(rows)))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write(f"### Licence gate\n{len(rows)} third-party components, {violations} violations.\n")
+
+          if os.environ["EXPECT_FAILURE"] == "true":
+              if violations:
+                  print(f"Self-test: the gate found {violations} violation(s), as expected.")
+                  sys.exit(0)
+              print("::error::Self-test: expected a violation and found none")
+              sys.exit(1)
+          sys.exit(1 if violations else 0)
+
+      - name: Upload NOTICE and SBOM
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: |
+            NOTICE.generated.txt
+            sbom.cdx.json
+          if-no-files-found: warn
+          retention-days: 30

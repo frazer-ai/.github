@@ -1,0 +1,25 @@
+name: Task
+description: A unit of planned work, tied to the implementation plan
+labels: [task]
+body:
+  - type: input
+    id: plan-task
+    attributes:
+      label: Plan task
+      description: The task ID in the implementation plan, for example 3d.2
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What done looks like
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Proof
+      description: The check, test or evidence that proves it is done
+    validations:
+      required: true

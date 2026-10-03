@@ -1,0 +1,62 @@
+# Web gate (plan task 1a): install with the lockfile, then run the package's
+# standard scripts in order. A script the package does not define is skipped
+# (`pnpm run --if-present`), so the same gate serves the console, the website
+# and small packages.
+#
+# pnpm's version comes from the `packageManager` field of package.json.
+name: web-check
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory with package.json and pnpm-lock.yaml
+        type: string
+        default: "."
+      runs-on:
+        description: Runner label
+        type: string
+        default: ubuntu-24.04
+      node-version:
+        description: Node.js version
+        type: string
+        default: "24"
+      scripts:
+        description: Space-separated package.json scripts, run in this order when present
+        type: string
+        default: typecheck lint format:check test build
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Install, typecheck, lint, test, build
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ${{ inputs.working-directory }}/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.working-directory }}/pnpm-lock.yaml
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - name: Scripts
+        env:
+          SCRIPTS: ${{ inputs.scripts }}
+        run: |
+          for script in $SCRIPTS; do
+            echo "::group::pnpm run $script"
+            pnpm run --if-present "$script"
+            echo "::endgroup::"
+          done

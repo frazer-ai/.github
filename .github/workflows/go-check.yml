@@ -1,0 +1,145 @@
+# Go gate (plan task 1a): the same checks for every Go module, called by the
+# pull-request workflow and by the release workflow, so "the release ran what
+# the PR ran" is true by construction (Vektor's testing/gates.yml pattern).
+#
+# The Go version comes from the module's go.mod (go and toolchain lines).
+name: go-check
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Module directory, relative to the repository root
+        type: string
+        default: "."
+      runs-on:
+        description: Runner label
+        type: string
+        default: ubuntu-24.04
+      golangci-lint-version:
+        description: golangci-lint version
+        type: string
+        # renovate: datasource=github-releases depName=golangci/golangci-lint
+        default: v2.14.0
+      govulncheck-version:
+        description: golang.org/x/vuln version
+        type: string
+        # renovate: datasource=go depName=golang.org/x/vuln
+        default: v1.8.0
+      gotestsum-version:
+        description: gotest.tools/gotestsum version
+        type: string
+        # renovate: datasource=go depName=gotest.tools/gotestsum
+        default: v1.13.0
+      race:
+        description: Run the tests with the race detector
+        type: boolean
+        default: true
+      test-timeout:
+        description: go test -timeout
+        type: string
+        default: 20m
+      artifact-name:
+        description: Name of the uploaded test report (unique per run)
+        type: string
+        default: go-test-report
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Format, tidy, vet, lint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/go.mod
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+      - name: go.mod and go.sum are tidy
+        run: go mod tidy -diff
+      - name: go vet
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ inputs.golangci-lint-version }}
+          working-directory: ${{ inputs.working-directory }}
+
+  test:
+    name: Test
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/go.mod
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      # Shuffled and uncached; no retry-to-green.
+      - name: go test
+        env:
+          RACE: ${{ inputs.race }}
+          TEST_TIMEOUT: ${{ inputs.test-timeout }}
+        run: |
+          set -o pipefail
+          flags=(-count=1 -shuffle=on -timeout "$TEST_TIMEOUT" -json)
+          if [ "$RACE" = "true" ]; then flags+=(-race); fi
+          go test "${flags[@]}" ./... | tee test-report.json
+      - name: JUnit report
+        if: always()
+        env:
+          GOTESTSUM_VERSION: ${{ inputs.gotestsum-version }}
+        run: |
+          if [ -f test-report.json ]; then
+            go run "gotest.tools/gotestsum@${GOTESTSUM_VERSION}" --junitfile test-report.xml \
+              --raw-command cat test-report.json > /dev/null
+          fi
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: |
+            ${{ inputs.working-directory }}/test-report.json
+            ${{ inputs.working-directory }}/test-report.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  vuln:
+    name: govulncheck
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/go.mod
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      - name: govulncheck
+        env:
+          GOVULNCHECK_VERSION: ${{ inputs.govulncheck-version }}
+        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
