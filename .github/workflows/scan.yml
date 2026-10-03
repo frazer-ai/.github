@@ -1,0 +1,156 @@
+# Security scanners (plan task 1f.5), for every repository:
+#
+#   Betterleaks  leaked secrets in the whole git history
+#   OSV-Scanner  known vulnerabilities in every lockfile and go.mod
+#   Trivy        vulnerabilities and misconfigurations (Dockerfiles, Kubernetes,
+#                Helm, OpenTofu) in the working tree
+#
+# govulncheck stays in go-check, where it sees which vulnerable code is called.
+#
+# Trivy runs from its image pinned by digest, after cosign verifies the
+# signature against Aqua's release workflow; a moved tag or a swapped image
+# fails the gate instead of running. Betterleaks and OSV-Scanner are built with
+# `go install`, so the Go checksum database verifies their source.
+#
+# expect-failure: true inverts the gate for a fixture with known findings:
+# OSV-Scanner and Trivy must both fail (self-check proves the gate can fail).
+name: scan
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory OSV-Scanner and Trivy scan; Betterleaks always scans the whole history
+        type: string
+        default: "."
+      runs-on:
+        description: Runner label
+        type: string
+        default: ubuntu-24.04
+      severity:
+        description: Trivy severities that fail the gate
+        type: string
+        default: HIGH,CRITICAL
+      expect-failure:
+        description: Pass only if OSV-Scanner and Trivy both report findings (fixtures)
+        type: boolean
+        default: false
+      go-version:
+        description: Go used to build the scanners
+        type: string
+        default: "1.27"
+      osv-scanner-version:
+        description: OSV-Scanner version
+        type: string
+        # renovate: datasource=github-releases depName=google/osv-scanner
+        default: v2.6.0
+      betterleaks-version:
+        description: Betterleaks version
+        type: string
+        # renovate: datasource=github-releases depName=betterleaks/betterleaks
+        default: v1.9.0
+      trivy-version:
+        description: Trivy version; the image digest and signing identity must match it
+        type: string
+        default: 0.75.0
+      trivy-digest:
+        description: Digest of ghcr.io/aquasecurity/trivy:<trivy-version> (the multi-arch index)
+        type: string
+        default: sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+      cosign-release:
+        description: cosign version
+        type: string
+        # renovate: datasource=github-releases depName=sigstore/cosign
+        default: v3.1.3
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Betterleaks, OSV-Scanner, Trivy
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ inputs.cosign-release }}
+
+      - name: Install the scanners
+        env:
+          OSV_VERSION: ${{ inputs.osv-scanner-version }}
+          BETTERLEAKS_VERSION: ${{ inputs.betterleaks-version }}
+          TRIVY_VERSION: ${{ inputs.trivy-version }}
+          TRIVY_DIGEST: ${{ inputs.trivy-digest }}
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/scanners"
+          mkdir -p "$bin" "$RUNNER_TEMP/trivy-cache"
+          GOBIN="$bin" go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_VERSION}"
+          GOBIN="$bin" go install "github.com/betterleaks/betterleaks@${BETTERLEAKS_VERSION}"
+
+          image="ghcr.io/aquasecurity/trivy@${TRIVY_DIGEST}"
+          cosign verify "$image" \
+            --certificate-identity "https://github.com/aquasecurity/trivy/.github/workflows/reusable-release.yaml@refs/tags/v${TRIVY_VERSION}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "Trivy ${TRIVY_VERSION} (${TRIVY_DIGEST}) signature verified" >> "$GITHUB_STEP_SUMMARY"
+          cat > "$bin/trivy" <<SH
+          #!/usr/bin/env bash
+          exec docker run --rm -v "\$PWD:/src:ro" -w /src -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" "$image" "\$@"
+          SH
+          chmod +x "$bin/trivy"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Betterleaks (git history)
+        id: betterleaks
+        continue-on-error: true
+        run: betterleaks git . --no-banner --redact
+
+      - name: OSV-Scanner
+        id: osv
+        continue-on-error: true
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set +e
+          osv-scanner scan source --recursive .
+          code=$?
+          # 128: nothing to scan (no lockfile or go.mod), which is not a finding.
+          if [ "$code" -eq 128 ]; then echo "No package sources to scan."; exit 0; fi
+          exit "$code"
+
+      - name: Trivy (vulnerabilities and misconfigurations)
+        id: trivy
+        continue-on-error: true
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          SEVERITY: ${{ inputs.severity }}
+        run: trivy fs --scanners vuln,misconfig --severity "$SEVERITY" --exit-code 1 --no-progress .
+
+      - name: Result
+        env:
+          EXPECT_FAILURE: ${{ inputs.expect-failure }}
+          BETTERLEAKS: ${{ steps.betterleaks.outcome }}
+          OSV: ${{ steps.osv.outcome }}
+          TRIVY: ${{ steps.trivy.outcome }}
+        run: |
+          echo "betterleaks=$BETTERLEAKS osv=$OSV trivy=$TRIVY"
+          if [ "$EXPECT_FAILURE" = "true" ]; then
+            if [ "$OSV" = "failure" ] && [ "$TRIVY" = "failure" ]; then
+              echo "Both vulnerability scanners reported the fixture's findings, as expected."
+              exit 0
+            fi
+            echo "::error::expected OSV-Scanner and Trivy to report findings"
+            exit 1
+          fi
+          if [ "$BETTERLEAKS" != "success" ] || [ "$OSV" != "success" ] || [ "$TRIVY" != "success" ]; then
+            echo "::error::a scanner reported findings or did not run; see the steps above"
+            exit 1
+          fi

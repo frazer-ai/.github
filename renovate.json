@@ -1,4 +1,5 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["local>frazer-ai/.github:renovate-config"]
+  "extends": ["local>frazer-ai/.github:renovate-config"],
+  "ignorePaths": ["testdata/vuln/**"]
 }
