@@ -6,6 +6,8 @@ name: self-check
 
 on:
   pull_request:
+    # edited: a fixed PR title reruns the names gate.
+    types: [opened, edited, synchronize, reopened]
   push:
     branches: [master]
 
@@ -95,10 +97,21 @@ jobs:
       working-directory: testdata/vuln
       expect-failure: true
 
+  names:
+    uses: ./.github/workflows/names.yml
+    with:
+      exclude: ^testdata/names-bad/
+
+  names-must-fail:
+    uses: ./.github/workflows/names.yml
+    with:
+      working-directory: testdata/names-bad
+      expect-failure: true
+
   required:
     name: required
     if: always()
-    needs: [workflows, go, web, tofu, image, licences, licences-must-fail, scan, scan-must-fail]
+    needs: [workflows, go, web, tofu, image, licences, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
