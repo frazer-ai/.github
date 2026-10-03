@@ -1,0 +1,7 @@
+# zizmor configuration (self-check.yml). Every action is pinned by commit SHA;
+# the unpinned-uses audit enforces that by default.
+rules:
+  # Local reusable workflows are called with "./"; actionlint and every
+  # GitHub runner version we use understand it.
+  self-repository:
+    disable: true

@@ -1,0 +1,101 @@
+# Checks this repository: lints every workflow, validates the Renovate
+# config, and runs each shared workflow against the fixtures in testdata/,
+# including a licence-gate run that must fail. `required` is the one check
+# the ruleset requires (repositories.md §9.4).
+name: self-check
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflows:
+    name: actionlint, zizmor, Renovate config
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      - name: actionlint
+        env:
+          # renovate: datasource=github-releases depName=rhysd/actionlint
+          ACTIONLINT_VERSION: v1.7.12
+        run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+      - name: zizmor
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          advanced-security: false
+          # renovate: datasource=pypi depName=zizmor
+          version: 1.30.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Renovate config
+        env:
+          # renovate: datasource=npm depName=renovate
+          RENOVATE_VERSION: 44.132.2
+        run: npx --yes --package "renovate@${RENOVATE_VERSION}" -- renovate-config-validator --strict renovate.json renovate-config.json
+
+  go:
+    uses: ./.github/workflows/go-check.yml
+    with:
+      working-directory: testdata/go
+      artifact-name: go-fixture-test-report
+
+  web:
+    uses: ./.github/workflows/web-check.yml
+    with:
+      working-directory: testdata/web
+
+  tofu:
+    uses: ./.github/workflows/tofu-check.yml
+    with:
+      working-directory: testdata/tofu
+
+  image:
+    uses: ./.github/workflows/image-build.yml
+    with:
+      working-directory: testdata/go
+      importpath: ./cmd/hello
+
+  licences:
+    uses: ./.github/workflows/license-gate.yml
+    with:
+      working-directory: testdata/go
+      artifact-name: license-gate-go-fixture
+
+  licences-must-fail:
+    uses: ./.github/workflows/license-gate.yml
+    with:
+      working-directory: testdata/license-bad
+      artifact-name: license-gate-bad-fixture
+      expect-failure: true
+
+  required:
+    name: required
+    if: always()
+    needs: [workflows, go, web, tofu, image, licences, licences-must-fail]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: All checks passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then echo "::error::a required check did not pass ($r)"; exit 1; fi
+          done

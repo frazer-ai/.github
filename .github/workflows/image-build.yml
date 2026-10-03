@@ -1,0 +1,217 @@
+# The one image builder (plan tasks 1a and 1f, operations.md §1): every Frazer
+# image is built here, so SLSA Build L3 provenance names this workflow as the
+# builder. One image per call; callers use a matrix for several services.
+#
+#   push: false  build for every platform, publish nothing (PR checks)
+#   push: true   publish by digest, then attach a GitHub build-provenance
+#                attestation and a CycloneDX SBOM attestation
+#   sign: true   also sign with the release key held in OpenBao transit
+#                (`hashivault://…`), after logging in to OpenBao with this
+#                job's GitHub OIDC token. The key never leaves OpenBao.
+#
+# Signing goes live in task 1f, when OpenBao and Frazer Registry exist; until
+# then callers leave `sign` off.
+name: image-build
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Go module directory, relative to the repository root
+        type: string
+        default: "."
+      runs-on:
+        description: Runner label
+        type: string
+        default: ubuntu-24.04
+      importpath:
+        description: Go package to build, for example ./cmd/frazer-api
+        type: string
+        required: true
+      repository:
+        description: Image repository (ko's KO_DOCKER_REPO with --bare), for example ghcr.io/frazer-ai/frazer-api
+        type: string
+        default: ""
+      platforms:
+        description: Comma-separated platforms
+        type: string
+        default: linux/amd64,linux/arm64
+      push:
+        description: Publish the image
+        type: boolean
+        default: false
+      sign:
+        description: Sign with the OpenBao transit key (needs push)
+        type: boolean
+        default: false
+      openbao-addr:
+        description: OpenBao address, for signing
+        type: string
+        default: ""
+      openbao-auth-path:
+        description: OpenBao JWT auth mount for GitHub OIDC
+        type: string
+        default: jwt-github
+      openbao-role:
+        description: OpenBao role bound to this workflow (job_workflow_ref)
+        type: string
+        default: image-build
+      cosign-key:
+        description: cosign key reference
+        type: string
+        default: hashivault://frazer-release
+      ko-version:
+        description: ko version
+        type: string
+        # renovate: datasource=github-releases depName=ko-build/ko
+        default: v0.19.1
+      cosign-release:
+        description: cosign version
+        type: string
+        # renovate: datasource=github-releases depName=sigstore/cosign
+        default: v3.1.3
+      syft-version:
+        description: Syft version
+        type: string
+        # renovate: datasource=github-releases depName=anchore/syft
+        default: v1.54.0
+    secrets:
+      registry-username:
+        description: Username for a registry other than ghcr.io
+        required: false
+      registry-password:
+        description: Password or token for a registry other than ghcr.io
+        required: false
+    outputs:
+      image:
+        description: The image reference by digest (repository@sha256:…)
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: The image digest
+        value: ${{ jobs.build.outputs.digest }}
+
+# No permissions block on purpose: the job inherits the caller's. A PR build
+# (push: false) needs only `contents: read`. A publishing caller grants
+# `contents: read`, `packages: write` (GHCR), `id-token: write` (attestations
+# and OpenBao) and `attestations: write` on the calling job.
+
+jobs:
+  build:
+    name: Build ${{ inputs.importpath }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Check inputs
+        env:
+          PUSH: ${{ inputs.push }}
+          SIGN: ${{ inputs.sign }}
+          REPOSITORY: ${{ inputs.repository }}
+          OPENBAO_ADDR: ${{ inputs.openbao-addr }}
+        working-directory: .
+        run: |
+          if [ "$PUSH" = "true" ] && [ -z "$REPOSITORY" ]; then echo "::error::push needs a repository"; exit 1; fi
+          if [ "$SIGN" = "true" ] && [ "$PUSH" != "true" ]; then echo "::error::sign needs push"; exit 1; fi
+          if [ "$SIGN" = "true" ] && [ -z "$OPENBAO_ADDR" ]; then echo "::error::sign needs openbao-addr"; exit 1; fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/go.mod
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      - uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+        with:
+          version: ${{ inputs.ko-version }}
+
+      - name: Registry login
+        if: inputs.push
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REGISTRY_USERNAME: ${{ secrets.registry-username }}
+          REGISTRY_PASSWORD: ${{ secrets.registry-password }}
+        run: |
+          registry="${REPOSITORY%%/*}"
+          if [ "$registry" = "ghcr.io" ]; then
+            printf '%s' "$GITHUB_TOKEN" | ko login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          else
+            printf '%s' "$REGISTRY_PASSWORD" | ko login "$registry" -u "$REGISTRY_USERNAME" --password-stdin
+          fi
+
+      - name: ko build
+        id: build
+        env:
+          IMPORTPATH: ${{ inputs.importpath }}
+          REPOSITORY: ${{ inputs.repository }}
+          PLATFORMS: ${{ inputs.platforms }}
+          PUSH: ${{ inputs.push }}
+        run: |
+          set -euo pipefail
+          export KO_DOCKER_REPO="${REPOSITORY:-registry.invalid/build-check}"  # not ko.local: that would load into a Docker daemon
+          ko build "$IMPORTPATH" --bare --platform="$PLATFORMS" --push="$PUSH" --sbom=none \
+            --image-refs=image-refs.txt
+          ref=$(head -n1 image-refs.txt)
+          digest="${ref##*@}"
+          echo "image=${KO_DOCKER_REPO}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Built ${KO_DOCKER_REPO}@${digest} for ${PLATFORMS}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: SBOM
+        if: inputs.push
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ steps.build.outputs.image }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          syft-version: ${{ inputs.syft-version }}
+          upload-artifact: false
+          dependency-snapshot: false
+
+      - name: Provenance attestation
+        if: inputs.push
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ inputs.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: SBOM attestation
+        if: inputs.push
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ inputs.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          predicate-type: https://cyclonedx.org/bom
+          predicate-path: sbom.cdx.json
+          push-to-registry: true
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: inputs.sign
+        with:
+          cosign-release: ${{ inputs.cosign-release }}
+
+      - name: Sign with the OpenBao transit key
+        if: inputs.sign
+        env:
+          OPENBAO_ADDR: ${{ inputs.openbao-addr }}
+          AUTH_PATH: ${{ inputs.openbao-auth-path }}
+          ROLE: ${{ inputs.openbao-role }}
+          KEY: ${{ inputs.cosign-key }}
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          jwt=$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=openbao" | jq -r .value)
+          token=$(jq -n --arg role "$ROLE" --arg jwt "$jwt" '{role: $role, jwt: $jwt}' |
+            curl -sSf -X POST --data @- "${OPENBAO_ADDR}/v1/auth/${AUTH_PATH}/login" | jq -r .auth.client_token)
+          echo "::add-mask::${token}"
+          # The key is used inside OpenBao; nothing is uploaded to the public
+          # transparency log, which would expose the private repository's name.
+          VAULT_ADDR="$OPENBAO_ADDR" VAULT_TOKEN="$token" \
+            cosign sign --yes --tlog-upload=false --key "$KEY" "$IMAGE"

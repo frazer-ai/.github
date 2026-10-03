@@ -1,0 +1,5 @@
+# Teams are created as code by the `org` repository (plan task 1b).
+*                       @frazer-ai/platform
+/.github/workflows/     @frazer-ai/owners @frazer-ai/platform
+/profile/               @frazer-ai/owners
+/SECURITY.md            @frazer-ai/owners

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Frazer AI shared Renovate preset. Use it with \"extends\": [\"local>frazer-ai/.github:renovate-config\"] (repositories.md §9.4).",
+  "extends": [
+    "config:best-practices",
+    ":semanticCommitTypeAll(chore)",
+    ":dependencyDashboard"
+  ],
+  "minimumReleaseAge": "3 days",
+  "internalChecksFilter": "strict",
+  "platformAutomerge": true,
+  "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
+  "packageRules": [
+    {
+      "description": "Majors wait a week",
+      "matchUpdateTypes": ["major"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "Group by ecosystem",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "Go modules"
+    },
+    {
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "pnpm packages"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "matchManagers": ["helmv3", "helm-values"],
+      "groupName": "Helm"
+    },
+    {
+      "matchManagers": ["dockerfile", "kubernetes", "docker-compose"],
+      "groupName": "Container images"
+    },
+    {
+      "matchManagers": ["terraform", "terraform-version"],
+      "groupName": "OpenTofu"
+    },
+    {
+      "matchManagers": ["custom.regex"],
+      "groupName": "Pinned tools"
+    },
+    {
+      "description": "Automerge patches, pins and digests once the required check passes",
+      "matchUpdateTypes": ["patch", "pin", "digest", "pinDigest"],
+      "automerge": true
+    },
+    {
+      "description": "Automerge minor updates of development dependencies",
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["minor"],
+      "automerge": true
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "Tool versions annotated with a `# renovate:` comment (workflow inputs, Makefiles, mise)",
+      "customType": "regex",
+      "managerFilePatterns": ["/\\.ya?ml$/", "/(^|/)Makefile$/", "/\\.mk$/", "/(^|/)\\.?mise\\.toml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)(?: extractVersion=(?<extractVersion>\\S+?))?\\s+[\\w.-]*\\s*[:=]\\s*\"?(?<currentValue>[^\"\\s]+)\"?"
+      ],
+      "extractVersionTemplate": "{{#if extractVersion}}{{{extractVersion}}}{{else}}^(?<version>.+)${{/if}}"
+    }
+  ]
+}
