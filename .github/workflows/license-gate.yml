@@ -187,6 +187,11 @@ jobs:
           for c in sbom.get("components", []):
               if c.get("type") not in ("library", "framework"):
                   continue
+              # Actions and reusable workflows named in workflow files are CI
+              # references, not shipped code; Syft lists them without licences.
+              props = {p.get("name"): p.get("value", "") for p in c.get("properties", [])}
+              if props.get("syft:package:type", "").startswith("github-action") or c.get("purl", "").startswith("pkg:github/"):
+                  continue
               name, version = c.get("name", "?"), c.get("version") or "?"
               if name in first_party:
                   continue
