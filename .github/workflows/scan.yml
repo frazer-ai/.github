@@ -1,6 +1,7 @@
 # Security scanners (plan task 1f.5), for every repository:
 #
-#   Betterleaks  leaked secrets in the whole git history
+#   Betterleaks  leaked secrets in git history: a pull request's own commits,
+#                a pushed branch's whole history, or every ref (all-refs)
 #   OSV-Scanner  known vulnerabilities in every lockfile and go.mod
 #   Trivy        vulnerabilities and misconfigurations (Dockerfiles, Kubernetes,
 #                Helm, OpenTofu) in the working tree
@@ -20,9 +21,13 @@ on:
   workflow_call:
     inputs:
       working-directory:
-        description: Directory OSV-Scanner and Trivy scan; Betterleaks always scans the whole history
+        description: Directory OSV-Scanner and Trivy scan; Betterleaks scans the repository's history
         type: string
         default: "."
+      all-refs:
+        description: Betterleaks scans every branch and tag, not only the change's own history (for a scheduled run)
+        type: boolean
+        default: false
       runs-on:
         description: Runner label
         type: string
@@ -109,10 +114,39 @@ jobs:
           chmod +x "$bin/trivy"
           echo "$bin" >> "$GITHUB_PATH"
 
+      # Which history is scanned, and why:
+      #   pull request, merge queue  the commits the change adds (base..head).
+      #                              A finding on another branch must not
+      #                              fail this change: it fails that branch's
+      #                              own pull request.
+      #   push, other events         everything reachable from the commit.
+      #   all-refs: true             every branch and tag, for a scheduled run
+      #                              that finds what no pull request saw.
+      # The checkout above fetches every ref (fetch-depth: 0), so without an
+      # explicit range git would walk all of them.
       - name: Betterleaks (git history)
         id: betterleaks
         continue-on-error: true
-        run: betterleaks git . --no-banner --redact
+        env:
+          EVENT: ${{ github.event_name }}
+          ALL_REFS: ${{ inputs.all-refs }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$ALL_REFS" = "true" ]; then
+            range="--all"
+          elif [ -n "$PR_BASE" ] && [ -n "$PR_HEAD" ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ -n "$MG_BASE" ] && [ -n "$MG_HEAD" ]; then
+            range="$MG_BASE..$MG_HEAD"
+          else
+            range="HEAD"
+          fi
+          echo "Betterleaks scans git log $range ($EVENT)" | tee -a "$GITHUB_STEP_SUMMARY"
+          betterleaks git . --no-banner --redact --log-opts="$range"
 
       - name: OSV-Scanner
         id: osv
