@@ -24,7 +24,7 @@ on:
       runs-on:
         description: Runner label
         type: string
-        default: ubuntu-24.04
+        default: hetzner
       exclude:
         description: Extended regex of paths (relative to working-directory) to skip
         type: string

@@ -14,7 +14,7 @@ on:
       runs-on:
         description: Runner label
         type: string
-        default: ubuntu-24.04
+        default: hetzner
       tofu-version:
         description: OpenTofu version
         type: string

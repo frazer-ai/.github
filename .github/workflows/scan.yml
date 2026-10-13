@@ -31,7 +31,7 @@ on:
       runs-on:
         description: Runner label
         type: string
-        default: ubuntu-24.04
+        default: hetzner
       severity:
         description: Trivy severities that fail the gate
         type: string

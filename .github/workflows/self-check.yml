@@ -54,34 +54,40 @@ jobs:
   go:
     uses: ./.github/workflows/go-check.yml
     with:
+      runs-on: ubuntu-24.04
       working-directory: testdata/go
       artifact-name: go-fixture-test-report
 
   web:
     uses: ./.github/workflows/web-check.yml
     with:
+      runs-on: ubuntu-24.04
       working-directory: testdata/web
 
   tofu:
     uses: ./.github/workflows/tofu-check.yml
     with:
+      runs-on: ubuntu-24.04
       working-directory: testdata/tofu
 
   image:
     uses: ./.github/workflows/image-build.yml
     with:
+      runs-on: ubuntu-24.04
       working-directory: testdata/go
       importpath: ./cmd/hello
 
   licences:
     uses: ./.github/workflows/license-gate.yml
     with:
+      runs-on: ubuntu-24.04
       working-directory: testdata/go
       artifact-name: license-gate-go-fixture
 
   licences-must-fail:
     uses: ./.github/workflows/license-gate.yml
     with:
+      runs-on: ubuntu-24.04
       working-directory: testdata/license-bad
       artifact-name: license-gate-bad-fixture
       expect-failure: true
@@ -89,22 +95,26 @@ jobs:
   scan:
     uses: ./.github/workflows/scan.yml
     with:
+      runs-on: ubuntu-24.04
       working-directory: testdata/go
 
   scan-must-fail:
     uses: ./.github/workflows/scan.yml
     with:
+      runs-on: ubuntu-24.04
       working-directory: testdata/vuln
       expect-failure: true
 
   names:
     uses: ./.github/workflows/names.yml
     with:
+      runs-on: ubuntu-24.04
       exclude: ^testdata/names-bad/
 
   names-must-fail:
     uses: ./.github/workflows/names.yml
     with:
+      runs-on: ubuntu-24.04
       working-directory: testdata/names-bad
       expect-failure: true
 
