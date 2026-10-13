@@ -23,7 +23,7 @@ on:
       runs-on:
         description: Runner label
         type: string
-        default: ubuntu-24.04
+        default: hetzner
       importpath:
         description: Go package to build, for example ./cmd/frazer-api
         type: string

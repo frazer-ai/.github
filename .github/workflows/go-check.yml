@@ -15,7 +15,7 @@ on:
       runs-on:
         description: Runner label
         type: string
-        default: ubuntu-24.04
+        default: hetzner
       golangci-lint-version:
         description: golangci-lint version
         type: string
