@@ -89,7 +89,13 @@ jobs:
           echo "SYFT_GOLANG_SEARCH_LOCAL_MOD_CACHE_LICENSES=true" >> "$GITHUB_ENV"
           echo "SYFT_GOLANG_LOCAL_MOD_CACHE_DIR=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
 
+      # A pnpm or yarn lockfile carries no licences, so without this every
+      # JavaScript dependency had "no licence". Syft looks each one up in the
+      # npm registry instead (pnpm-lock.yaml since Syft 1.36); a component whose
+      # lockfile entry names a licence keeps it.
       - name: SBOM
+        env:
+          SYFT_JAVASCRIPT_SEARCH_REMOTE_LICENSES: "true"
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: ${{ inputs.working-directory }}
