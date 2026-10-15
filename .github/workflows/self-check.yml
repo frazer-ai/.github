@@ -84,6 +84,14 @@ jobs:
       working-directory: testdata/go
       artifact-name: license-gate-go-fixture
 
+  # A pnpm lockfile: the licence comes from the npm registry, not the lock.
+  licences-js:
+    uses: ./.github/workflows/license-gate.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/license-js
+      artifact-name: license-gate-js-fixture
+
   licences-must-fail:
     uses: ./.github/workflows/license-gate.yml
     with:
@@ -121,7 +129,7 @@ jobs:
   required:
     name: required
     if: always()
-    needs: [workflows, go, web, tofu, image, licences, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
+    needs: [workflows, go, web, tofu, image, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
