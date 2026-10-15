@@ -106,7 +106,10 @@ jobs:
           ALLOW: ${{ inputs.allow }}
           EXCEPTIONS_FILE: ${{ inputs.exceptions-file }}
           EXPECT_FAILURE: ${{ inputs.expect-failure }}
-        shell: python
+        # `python3`, not `python`: the self-hosted runners (Ubuntu 24.04 and
+        # 26.04) ship python3 only, and `shell: python` failed there with
+        # "python: command not found".
+        shell: python3 {0}
         run: |
           import json, os, re, subprocess, sys
           from pathlib import Path
