@@ -9,7 +9,7 @@ on:
     # edited: a fixed PR title reruns the names gate.
     types: [opened, edited, synchronize, reopened]
   push:
-    branches: [master]
+    branches: [main]
 
 permissions:
   contents: read
