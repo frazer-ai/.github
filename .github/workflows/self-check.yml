@@ -77,6 +77,27 @@ jobs:
       working-directory: testdata/go
       importpath: ./cmd/hello
 
+  # The publishing path, which `image` (push: false) skips: the fixture
+  # image pushed to GHCR, its provenance and SBOM attested by actions/attest
+  # and signed again on public-good by cosign, which verifies its bundles.
+  # Not on a fork's pull request, whose token can neither write packages nor
+  # mint an OIDC token.
+  image-publish:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/image-build.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/go
+      importpath: ./cmd/hello
+      repository: ghcr.io/frazer-ai/image-build-selftest
+      platforms: linux/amd64
+      push: true
+
   licences:
     uses: ./.github/workflows/license-gate.yml
     with:
@@ -129,15 +150,19 @@ jobs:
   required:
     name: required
     if: always()
-    needs: [workflows, go, web, tofu, image, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
+    needs: [workflows, go, web, tofu, image, image-publish, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: All checks passed
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          NEEDS: ${{ toJSON(needs) }}
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          echo "Results: $RESULTS"
-          for r in $RESULTS; do
-            if [ "$r" != "success" ]; then echo "::error::a required check did not pass ($r)"; exit 1; fi
-          done
+          # Every check passed; image-publish may be skipped only for a fork.
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if ! echo "$NEEDS" | jq -e --argjson fork "$FORK" \
+            'to_entries | all(.value.result == "success" or (.key == "image-publish" and $fork and .value.result == "skipped"))' > /dev/null; then
+            echo "::error::a required check did not pass"
+            exit 1
+          fi
