@@ -105,7 +105,8 @@ jobs:
       working-directory: testdata/go
       artifact-name: license-gate-go-fixture
 
-  # A pnpm lockfile: the licence comes from the npm registry, not the lock.
+  # A pnpm lockfile: the gate installs it, and the licence comes from the
+  # installed package, not the lock or the registry.
   licences-js:
     uses: ./.github/workflows/license-gate.yml
     with:
