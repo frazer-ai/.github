@@ -230,6 +230,7 @@ jobs:
                   return False
 
           sbom = json.loads(Path("sbom.cdx.json").read_text())
+          installed_manifest = re.compile(r"/node_modules/(?:@[^/]+/)?[^/]+/package\.json$")
           rows, violations = set(), 0
           for c in sbom.get("components", []):
               if c.get("type") not in ("library", "framework"):
@@ -248,6 +249,14 @@ jobs:
               # ours; Syft would list the modules compiled into it.
               paths = [v for k, v in props.items() if k.startswith("syft:location:") and k.endswith(":path")]
               if props.get("syft:package:foundBy", "").endswith("-binary-cataloger") and paths and all("/node_modules/" in p for p in paths):
+                  continue
+              # Likewise a package.json inside an installed npm package's own
+              # files (resolve's test/resolver/*/package.json fixtures,
+              # TypeScript's vendored vscode-jsonrpc) is that package's
+              # content, not a package we install: an installed package's
+              # manifest sits at node_modules/<name>/package.json or
+              # node_modules/@scope/<name>/package.json.
+              if props.get("syft:package:foundBy", "") == "javascript-package-cataloger" and paths and all("/node_modules/" in p for p in paths) and not any(installed_manifest.search(p) for p in paths):
                   continue
               exprs = []
               for l in c.get("licenses") or []:
