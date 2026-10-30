@@ -1,0 +1,17 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "components": [
+    {
+      "bom-ref": "unbound",
+      "type": "application",
+      "name": "unbound",
+      "version": "1.26.0",
+      "licenses": [{ "license": { "id": "BSD-3-Clause" } }],
+      "cpe": "cpe:2.3:a:nlnetlabs:unbound:1.26.0:*:*:*:*:*:*:*",
+      "purl": "pkg:generic/unbound@1.26.0?download_url=https%3A%2F%2Fnlnetlabs.nl%2Fdownloads%2Funbound%2Funbound-1.26.0.tar.gz"
+    }
+  ]
+}

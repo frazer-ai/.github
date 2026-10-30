@@ -1,0 +1,7 @@
+# Syft reads the image's own CycloneDX fragments (off by default since Syft
+# 1.0), and not the base image's SPDX documents, whose packages the apk
+# cataloger already lists.
+select-catalogers:
+  - +sbom-cataloger
+exclude:
+  - /var/lib/db/sbom/**

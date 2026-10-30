@@ -1,0 +1,5 @@
+# image-build's grype-config for the fixture. self-check expects the gate to
+# set this finding aside, and still to fail on CVE-2026-81642.
+ignore:
+  - vulnerability: CVE-2026-82717
+    reason: Fixture only, to check that image-build passes grype-config to Grype
