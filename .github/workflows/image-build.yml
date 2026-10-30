@@ -2,6 +2,19 @@
 # image is built here, so SLSA Build L3 provenance names this workflow as the
 # builder. One image per call; callers use a matrix for several services.
 #
+#   importpath   build a Go package with ko (every service image)
+#   dockerfile   build a Dockerfile with BuildKit instead, for an image that
+#                is not one Go package (frazer's Unbound resolver, compiled
+#                from checksummed source). working-directory is the build
+#                context, and the Dockerfile must lie inside it. BuildKit
+#                runs from its image pinned by digest, and every layer
+#                file's time and the image's creation time are the commit's,
+#                so a Dockerfile whose inputs are pinned gives one image per
+#                commit. RUN steps execute on the runner's architecture and
+#                nothing here installs emulation: pass the runner's platform
+#                in `platforms`, or cross-compile (FROM --platform=$BUILDPLATFORM).
+#                A call gives exactly one of importpath and dockerfile.
+#
 #   push: false  build for every platform, publish nothing (PR checks)
 #   push: true   publish by digest, then attach a GitHub build-provenance
 #                attestation and a CycloneDX SBOM attestation, and attest the
@@ -30,7 +43,7 @@ on:
   workflow_call:
     inputs:
       working-directory:
-        description: Go module directory, relative to the repository root
+        description: Go module directory (importpath), or the build context (dockerfile), relative to the repository root
         type: string
         default: "."
       runs-on:
@@ -38,11 +51,27 @@ on:
         type: string
         default: hetzner
       importpath:
-        description: Go package to build, for example ./cmd/frazer-api
+        description: Go package to build with ko, for example ./cmd/frazer-api; empty with dockerfile
         type: string
-        required: true
+        default: ""
+      dockerfile:
+        description: >-
+          Dockerfile to build with BuildKit instead of ko, relative to
+          working-directory, which is the build context and must contain it;
+          for example Dockerfile, with working-directory images/unbound.
+          Empty (the default) builds importpath with ko
+        type: string
+        default: ""
+      buildkit-version:
+        description: BuildKit version, for dockerfile; buildkit-digest must match it
+        type: string
+        default: v0.34.1
+      buildkit-digest:
+        description: Digest of docker.io/moby/buildkit:<buildkit-version> (the multi-arch index)
+        type: string
+        default: sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
       repository:
-        description: Image repository (ko's KO_DOCKER_REPO with --bare), for example ghcr.io/frazer-ai/frazer-api
+        description: Image repository (ko's KO_DOCKER_REPO with --bare, or BuildKit's image name), for example ghcr.io/frazer-ai/frazer-api
         type: string
         default: ""
       platforms:
@@ -111,7 +140,7 @@ on:
 
 jobs:
   build:
-    name: Build ${{ inputs.importpath }}
+    name: Build ${{ inputs.importpath || inputs.dockerfile }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30
     outputs:
@@ -127,54 +156,106 @@ jobs:
           SIGN: ${{ inputs.sign }}
           REPOSITORY: ${{ inputs.repository }}
           OPENBAO_ADDR: ${{ inputs.openbao-addr }}
+          IMPORTPATH: ${{ inputs.importpath }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
         working-directory: .
         run: |
           if [ "$PUSH" = "true" ] && [ -z "$REPOSITORY" ]; then echo "::error::push needs a repository"; exit 1; fi
           if [ "$SIGN" = "true" ] && [ "$PUSH" != "true" ]; then echo "::error::sign needs push"; exit 1; fi
           if [ "$SIGN" = "true" ] && [ -z "$OPENBAO_ADDR" ]; then echo "::error::sign needs openbao-addr"; exit 1; fi
+          if [ -z "${IMPORTPATH}${DOCKERFILE}" ] || { [ -n "$IMPORTPATH" ] && [ -n "$DOCKERFILE" ]; }; then
+            echo "::error::give exactly one of importpath and dockerfile"; exit 1
+          fi
+          # A relative path that stays inside working-directory; the build step
+          # checks it again once the files exist, symbolic links resolved.
+          if [ -n "$DOCKERFILE" ]; then
+            case "/${DOCKERFILE}/" in
+              //*|*/../*) echo "::error::dockerfile must be a relative path inside working-directory"; exit 1 ;;
+            esac
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: inputs.dockerfile == ''
         with:
           go-version-file: ${{ inputs.working-directory }}/go.mod
           cache-dependency-path: ${{ inputs.working-directory }}/go.sum
       - uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+        if: inputs.dockerfile == ''
         with:
           version: ${{ inputs.ko-version }}
+      - name: BuildKit builder
+        id: buildkit
+        if: inputs.dockerfile != ''
+        env:
+          BUILDKIT_VERSION: ${{ inputs.buildkit-version }}
+          BUILDKIT_DIGEST: ${{ inputs.buildkit-digest }}
+        run: |
+          set -euo pipefail
+          # A builder of its own, named uniquely: a self-hosted runner's Docker
+          # daemon may serve other jobs. The last step removes it.
+          builder="image-build-$(cat /proc/sys/kernel/random/uuid)"
+          docker buildx create --name "$builder" --driver docker-container \
+            --driver-opt "image=docker.io/moby/buildkit:${BUILDKIT_VERSION}@${BUILDKIT_DIGEST}" --bootstrap
+          echo "builder=${builder}" >> "$GITHUB_OUTPUT"
 
       - name: Registry login
         if: inputs.push
         env:
           REPOSITORY: ${{ inputs.repository }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
           GITHUB_TOKEN: ${{ github.token }}
           REGISTRY_USERNAME: ${{ secrets.registry-username }}
           REGISTRY_PASSWORD: ${{ secrets.registry-password }}
         run: |
+          # Both write the Docker config, which the SBOM step reads too.
+          login=(ko login)
+          if [ -n "$DOCKERFILE" ]; then login=(docker login); fi
           registry="${REPOSITORY%%/*}"
           if [ "$registry" = "ghcr.io" ]; then
-            printf '%s' "$GITHUB_TOKEN" | ko login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            printf '%s' "$GITHUB_TOKEN" | "${login[@]}" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           else
-            printf '%s' "$REGISTRY_PASSWORD" | ko login "$registry" -u "$REGISTRY_USERNAME" --password-stdin
+            printf '%s' "$REGISTRY_PASSWORD" | "${login[@]}" "$registry" -u "$REGISTRY_USERNAME" --password-stdin
           fi
 
-      - name: ko build
+      - name: Build
         id: build
         env:
           IMPORTPATH: ${{ inputs.importpath }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILDER: ${{ steps.buildkit.outputs.builder }}
           REPOSITORY: ${{ inputs.repository }}
           PLATFORMS: ${{ inputs.platforms }}
           PUSH: ${{ inputs.push }}
         run: |
           set -euo pipefail
-          export KO_DOCKER_REPO="${REPOSITORY:-registry.invalid/build-check}"  # not ko.local: that would load into a Docker daemon
-          ko build "$IMPORTPATH" --bare --platform="$PLATFORMS" --push="$PUSH" --sbom=none \
-            --image-refs=image-refs.txt
-          ref=$(head -n1 image-refs.txt)
-          digest="${ref##*@}"
-          echo "image=${KO_DOCKER_REPO}@${digest}" >> "$GITHUB_OUTPUT"
+          repo="${REPOSITORY:-registry.invalid/build-check}"  # not ko.local: that would load into a Docker daemon
+          if [ -z "$DOCKERFILE" ]; then
+            KO_DOCKER_REPO="$repo" ko build "$IMPORTPATH" --bare --platform="$PLATFORMS" --push="$PUSH" --sbom=none \
+              --image-refs=image-refs.txt
+            ref=$(head -n1 image-refs.txt)
+            digest="${ref##*@}"
+          else
+            context=$(realpath -e .)
+            file=$(realpath -e -- "$DOCKERFILE") || { echo "::error::dockerfile ${DOCKERFILE} does not exist"; exit 1; }
+            case "$file" in
+              "$context"/*) ;;
+              *) echo "::error::dockerfile ${DOCKERFILE} resolves to ${file}, outside working-directory"; exit 1 ;;
+            esac
+            if [ ! -f "$file" ]; then echo "::error::dockerfile ${DOCKERFILE} is not a file"; exit 1; fi
+            # The image's provenance and SBOM are the attestations below, so
+            # BuildKit adds none of its own. It pushes the tag ko pushes
+            # (latest) and nothing when push is false.
+            docker buildx build --builder "$BUILDER" --file "$file" --platform "$PLATFORMS" \
+              --build-arg "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" \
+              --provenance=false --sbom=false --metadata-file "${RUNNER_TEMP}/buildkit-metadata.json" \
+              --output "type=image,name=${repo}:latest,push=${PUSH},rewrite-timestamp=true" "$context"
+            digest=$(jq -er '."containerimage.digest"' "${RUNNER_TEMP}/buildkit-metadata.json")
+          fi
+          echo "image=${repo}@${digest}" >> "$GITHUB_OUTPUT"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-          echo "Built ${KO_DOCKER_REPO}@${digest} for ${PLATFORMS}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Built ${repo}@${digest} for ${PLATFORMS}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: SBOM
         if: inputs.push
@@ -269,3 +350,9 @@ jobs:
           # transparency log, which would expose the private repository's name.
           VAULT_ADDR="$OPENBAO_ADDR" VAULT_TOKEN="$token" \
             cosign sign --yes --tlog-upload=false --key "$KEY" "$IMAGE"
+
+      - name: Remove the BuildKit builder
+        if: always() && steps.buildkit.outputs.builder != ''
+        env:
+          BUILDER: ${{ steps.buildkit.outputs.builder }}
+        run: docker buildx rm "$BUILDER"
