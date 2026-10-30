@@ -194,11 +194,12 @@ jobs:
         run: |
           set -euo pipefail
           # A builder of its own, named uniquely: a self-hosted runner's Docker
-          # daemon may serve other jobs. The last step removes it.
+          # daemon may serve other jobs. The last step removes it, also when
+          # it was created but failed to start, so its name is recorded first.
           builder="image-build-$(cat /proc/sys/kernel/random/uuid)"
+          echo "builder=${builder}" >> "$GITHUB_OUTPUT"
           docker buildx create --name "$builder" --driver docker-container \
             --driver-opt "image=docker.io/moby/buildkit:${BUILDKIT_VERSION}@${BUILDKIT_DIGEST}" --bootstrap
-          echo "builder=${builder}" >> "$GITHUB_OUTPUT"
 
       - name: Registry login
         if: inputs.push
@@ -355,4 +356,6 @@ jobs:
         if: always() && steps.buildkit.outputs.builder != ''
         env:
           BUILDER: ${{ steps.buildkit.outputs.builder }}
-        run: docker buildx rm "$BUILDER"
+        run: |
+          # Absent when creating it failed before it was registered.
+          if docker buildx inspect "$BUILDER" >/dev/null 2>&1; then docker buildx rm "$BUILDER"; fi
