@@ -13,11 +13,11 @@ workflows every repository calls. Plan: task 1a in `docs`
 | `.github/workflows/go-check.yml` | Go gate: gofmt, `go mod tidy -diff`, vet, golangci-lint, race tests (shuffled, uncached), govulncheck |
 | `.github/workflows/web-check.yml` | Web gate: `pnpm install --frozen-lockfile`, then `typecheck lint format:check test build` when defined |
 | `.github/workflows/tofu-check.yml` | OpenTofu gate: fmt, init without a backend, validate, TFLint, Trivy config scan (digest-pinned, signature-verified image), `tofu test` |
-| `.github/workflows/image-build.yml` | The one image builder: ko for a Go package, or BuildKit (pinned by digest) for a `dockerfile` inside its build context, multi-arch; on push, provenance and SBOM attestations with actions/attest, and the same predicates attested again on Sigstore's public-good instance (Rekor) by cosign, which frazer-install verifies offline; signing with the OpenBao transit key; with `vulnerability-gate`, Grype checks the image's CycloneDX SBOM before anything is attested, on PR builds too |
+| `.github/workflows/image-build.yml` | The one image builder: ko for a Go package, or BuildKit (pinned by digest) for a `dockerfile` inside its build context, multi-arch; on push, the image pushed by digest (crane), provenance and SBOM attestations with actions/attest, and the same predicates attested again on Sigstore's public-good instance (Rekor) by cosign, which frazer-install verifies offline; signing with the OpenBao transit key, and only then its `tags` (latest); with `vulnerability-gate`, Grype checks the image's CycloneDX SBOM before anything is attested or tagged, on PR builds too |
 | `.github/workflows/scan.yml` | Security scanners: Betterleaks (a pull request's own commits; a pushed branch's history; every ref with `all-refs: true` for a scheduled run), OSV-Scanner (lockfiles), Trivy (vulnerabilities and misconfigurations) from its digest-pinned, signature-verified image |
 | `.github/workflows/names.yml` | Naming gates: no other cloud's region IDs in tracked files, Conventional Commit PR titles |
 | `.github/workflows/license-gate.yml` | Licence gate: Syft SBOM, SPDX allow-list, exceptions file, generated NOTICE |
-| `.github/workflows/self-check.yml` | This repository's CI: lints the workflows and runs each one against `testdata/`, including fixtures that must fail (`license-bad`, `vuln`, `image-vuln`), and publishes the fixture images, ko's and the Dockerfile's, to `ghcr.io/frazer-ai/image-build-selftest` with their attestations (not on a fork's pull request) |
+| `.github/workflows/self-check.yml` | This repository's CI: lints the workflows and runs each one against `testdata/`, including fixtures that must fail (`license-bad`, `vuln`, `image-vuln`; the last is also published, and must get no tag and no attestation), and publishes the fixture images, ko's and the Dockerfile's, to `ghcr.io/frazer-ai/image-build-selftest` with their attestations (not on a fork's pull request) |
 
 ## Using the workflows
 
@@ -73,7 +73,7 @@ runner's platform, or cross-compile with `FROM --platform=$BUILDPLATFORM`.
 `vulnerability-gate: true` scans the image's CycloneDX SBOM with Grype
 (`grype-version`, built with `go install`) after the SBOM step and before
 the attestations, so an image with a finding at `fail-on` (`high`) or above
-gets no attestations, and verification refuses it. A PR build runs the same
+gets no attestations and no tag, and verification refuses it. A PR build runs the same
 gate on an OCI layout of its build, so the PR shows the failure first.
 Grype reads the SBOM rather than the image, so a component that no package
 database lists, such as a program compiled from source, counts once the
@@ -100,6 +100,16 @@ Grype's database comes from `grype-db-url`, by default Anchore's listing
 (`https://grype.anchore.io/databases`), into a directory of the job's own;
 the gate fails when the listing cannot be read or the database is more than
 five days old.
+
+### Tags
+
+A publishing build pushes the image by digest only, untagged, and moves its
+`tags` (default `latest`, whitespace-separated) to that digest as its last
+step: after the vulnerability gate, the attestations and the signature. A tag
+therefore never names an image that failed the gate or lacks its
+attestations. Neither builder pushes by itself: the build writes an OCI
+layout, which crane (`crane-version`, built with `go install`) pushes by
+digest and then tags. `tags: ""` leaves the image untagged.
 
 ### Renovate
 

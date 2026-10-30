@@ -98,6 +98,8 @@ jobs:
       repository: ghcr.io/frazer-ai/image-build-selftest
       platforms: linux/amd64
       push: true
+      # latest, and a tag of this run's own that image-gate-tags checks.
+      tags: latest selftest-${{ github.run_id }}-${{ github.run_attempt }}-ko
 
   # The dockerfile mode: BuildKit instead of ko, testdata/docker for both
   # platforms (the fixture runs nothing, so it needs no emulation).
@@ -175,7 +177,8 @@ jobs:
           exit "$fail"
 
   # The publishing path with the gate: testdata/docker passes it, then gets
-  # its attestations, as in image-dockerfile-publish.
+  # its attestations and a tag of this run's own, as in
+  # image-dockerfile-publish.
   image-gate-publish:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
@@ -192,6 +195,105 @@ jobs:
       platforms: linux/amd64
       push: true
       vulnerability-gate: true
+      tags: selftest-${{ github.run_id }}-${{ github.run_attempt }}-dockerfile
+
+  # The publishing path of an image that fails the gate, with BuildKit and
+  # with ko (testdata/image-vuln/ko carries the same fragment in kodata/):
+  # each is pushed by digest, and must get no attestation and not the tag
+  # of this run's own it asks for. Same permissions as the passing jobs, so
+  # a regression would attest or tag, and image-gate-tags would see it.
+  image-gate-must-fail-publish:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/image-build.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/image-vuln
+      dockerfile: Dockerfile
+      repository: ghcr.io/frazer-ai/image-build-selftest
+      push: true
+      syft-config: testdata/image-vuln/syft.yaml
+      vulnerability-gate: true
+      expect-failure: true
+      tags: selftest-${{ github.run_id }}-${{ github.run_attempt }}-must-fail-dockerfile
+
+  image-gate-must-fail-publish-ko:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/image-build.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/image-vuln/ko
+      importpath: .
+      repository: ghcr.io/frazer-ai/image-build-selftest
+      push: true
+      syft-config: testdata/image-vuln/syft.yaml
+      vulnerability-gate: true
+      expect-failure: true
+      tags: selftest-${{ github.run_id }}-${{ github.run_attempt }}-must-fail-ko
+
+  # Reads the registry and GitHub's attestations, not the jobs' own word:
+  # the two images that failed the gate are in the registry by digest, with
+  # neither their run tag nor an attestation; the passing jobs' run tags
+  # name their digests, which have attestations (the control).
+  image-gate-tags:
+    name: Tags and attestations only on images that passed the gate
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: [image-publish, image-gate-publish, image-gate-must-fail-publish, image-gate-must-fail-publish-ko]
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check the registry and the attestations
+        env:
+          REPOSITORY: frazer-ai/image-build-selftest
+          RUN_TAG: selftest-${{ github.run_id }}-${{ github.run_attempt }}
+          PASS_KO: ${{ needs.image-publish.outputs.digest }}
+          PASS_DOCKERFILE: ${{ needs.image-gate-publish.outputs.digest }}
+          FAIL_DOCKERFILE: ${{ needs.image-gate-must-fail-publish.outputs.digest }}
+          FAIL_KO: ${{ needs.image-gate-must-fail-publish-ko.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          token=$(curl -sSf -u "x:${GH_TOKEN}" "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPOSITORY}:pull" | jq -er .token)
+          echo "::add-mask::${token}"
+          accept="application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json"
+          # The HTTP status of a tag or digest, and the digest it names.
+          manifest() {
+            curl -sS -o /dev/null -I -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+              -w '%{http_code} %header{docker-content-digest}' "https://ghcr.io/v2/${REPOSITORY}/manifests/$1"
+          }
+          # 0 when the digest has attestations, 1 when GitHub has none (404).
+          attested() {
+            local out
+            if out=$(gh api "repos/${GITHUB_REPOSITORY}/attestations/$1" --jq '.attestations | length' 2>&1); then
+              [ "$out" -gt 0 ]; return
+            fi
+            if grep -q 'HTTP 404' <<< "$out"; then return 1; fi
+            echo "::error::could not list the attestations of $1: ${out}"; exit 1
+          }
+          fail=0
+          check() { if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "::error::$1: expected '$3', got '$2'"; fail=1; fi; }
+          for name in KO DOCKERFILE; do
+            pass="PASS_${name}" bad="FAIL_${name}" kind=$(tr '[:upper:]' '[:lower:]' <<< "$name")
+            check "the passing ${kind} image's run tag names it" "$(manifest "${RUN_TAG}-${kind}")" "200 ${!pass}"
+            if attested "${!pass}"; then echo "ok: the passing ${kind} image is attested"; else echo "::error::the passing ${kind} image has no attestation"; fail=1; fi
+            check "the failing ${kind} image is in the registry by digest" "$(manifest "${!bad}")" "200 ${!bad}"
+            check "the failing ${kind} image's run tag does not exist" "$(manifest "${RUN_TAG}-must-fail-${kind}" | cut -d' ' -f1)" "404"
+            if attested "${!bad}"; then echo "::error::the failing ${kind} image has attestations"; fail=1; else echo "ok: the failing ${kind} image has no attestation"; fi
+          done
+          exit "$fail"
 
   licences:
     uses: ./.github/workflows/license-gate.yml
@@ -245,7 +347,7 @@ jobs:
   required:
     name: required
     if: always()
-    needs: [workflows, go, web, tofu, image, image-publish, image-dockerfile, image-dockerfile-publish, image-gate, image-gate-must-fail, image-gate-findings, image-gate-publish, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
+    needs: [workflows, go, web, tofu, image, image-publish, image-dockerfile, image-dockerfile-publish, image-gate, image-gate-must-fail, image-gate-findings, image-gate-publish, image-gate-must-fail-publish, image-gate-must-fail-publish-ko, image-gate-tags, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -254,10 +356,10 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
           FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          # Every check passed; the three publishing jobs may be skipped only for a fork.
+          # Every check passed; the publishing jobs and image-gate-tags may be skipped only for a fork.
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           if ! echo "$NEEDS" | jq -e --argjson fork "$FORK" \
-            'to_entries | all(.value.result == "success" or ((.key == "image-publish" or .key == "image-dockerfile-publish" or .key == "image-gate-publish") and $fork and .value.result == "skipped"))' > /dev/null; then
+            'to_entries | all(.value.result == "success" or ((.key | IN("image-publish", "image-dockerfile-publish", "image-gate-publish", "image-gate-must-fail-publish", "image-gate-must-fail-publish-ko", "image-gate-tags")) and $fork and .value.result == "skipped"))' > /dev/null; then
             echo "::error::a required check did not pass"
             exit 1
           fi

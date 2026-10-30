@@ -16,10 +16,15 @@
 #                A call gives exactly one of importpath and dockerfile.
 #
 #   push: false  build for every platform, publish nothing (PR checks)
-#   push: true   publish by digest, then attach a GitHub build-provenance
-#                attestation and a CycloneDX SBOM attestation, and attest the
-#                same two predicates again keylessly on Sigstore's public-good
-#                instance, logged in Rekor
+#   push: true   publish by digest only, untagged; attach a GitHub
+#                build-provenance attestation and a CycloneDX SBOM
+#                attestation, and attest the same two predicates again
+#                keylessly on Sigstore's public-good instance, logged in
+#                Rekor; then, last, move `tags` (latest) to the digest. A tag
+#                therefore never names an image that failed the gate, or one
+#                without its attestations and signature. The build writes an
+#                OCI layout, which crane pushes by digest: ko pushes nothing
+#                without a tag, so neither builder pushes by itself.
 #   sign: true   also sign with the release key held in OpenBao transit
 #                (`hashivault://…`), after logging in to OpenBao with this
 #                job's GitHub OIDC token. The key never leaves OpenBao.
@@ -28,8 +33,9 @@
 #                Grype checks the image's CycloneDX SBOM against its
 #                vulnerability database and fails the job at `fail-on`
 #                (high) or above, after the SBOM and before either
-#                attestation or the signature: a published image that fails
-#                is never attested, so verification and admission refuse it.
+#                attestation, the signature or a tag: a published image that
+#                fails is pushed by digest but never attested or tagged, so
+#                verification and admission refuse it.
 #                It runs on a PR build too (push: false), which keeps an OCI
 #                layout of the build for Syft, so the PR shows the failure
 #                before it merges. Grype scans the SBOM, not the image: the
@@ -136,6 +142,17 @@ on:
         type: string
         # renovate: datasource=github-releases depName=anchore/syft
         default: v1.54.0
+      crane-version:
+        description: crane version (go-containerregistry), built with go install; it pushes by digest and moves the tags
+        type: string
+        # renovate: datasource=github-releases depName=google/go-containerregistry
+        default: v0.22.1
+      tags:
+        description: >-
+          Tags moved to the image last, with push, once it passed the gate
+          and got its attestations; whitespace-separated, empty for none
+        type: string
+        default: latest
       syft-config:
         description: >-
           Syft configuration file for the SBOM, relative to the repository
@@ -179,8 +196,8 @@ on:
         default: https://grype.anchore.io/databases
       expect-failure:
         description: >-
-          Self-test only. Pass only when the gate fails at fail-on; needs
-          vulnerability-gate, and never publishes
+          Self-test only. Pass only when the gate fails at fail-on, and then
+          attest, sign and tag nothing; needs vulnerability-gate
         type: boolean
         default: false
     secrets:
@@ -240,6 +257,7 @@ jobs:
           SYFT_CONFIG: ${{ inputs.syft-config }}
           GRYPE_CONFIG: ${{ inputs.grype-config }}
           VEX: ${{ inputs.vex }}
+          TAGS: ${{ inputs.tags }}
         working-directory: .
         run: |
           if [ "$PUSH" = "true" ] && [ -z "$REPOSITORY" ]; then echo "::error::push needs a repository"; exit 1; fi
@@ -260,9 +278,13 @@ jobs:
           if [ "$GATE" != "true" ] && [ -n "${GRYPE_CONFIG}${VEX}" ]; then
             echo "::error::grype-config and vex need vulnerability-gate"; exit 1
           fi
-          if [ "$EXPECT_FAILURE" = "true" ] && { [ "$GATE" != "true" ] || [ "$PUSH" = "true" ]; }; then
-            echo "::error::expect-failure needs vulnerability-gate and never publishes"; exit 1
+          if [ "$EXPECT_FAILURE" = "true" ] && [ "$GATE" != "true" ]; then
+            echo "::error::expect-failure needs vulnerability-gate"; exit 1
           fi
+          read -r -d '' -a tags <<< "$TAGS" || true
+          for tag in "${tags[@]}"; do
+            if ! [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then echo "::error::${tag} is not a valid tag"; exit 1; fi
+          done
           if [ "$GATE" = "true" ]; then
             case "$FAIL_ON" in
               negligible|low|medium|high|critical) ;;
@@ -313,7 +335,7 @@ jobs:
           REGISTRY_USERNAME: ${{ secrets.registry-username }}
           REGISTRY_PASSWORD: ${{ secrets.registry-password }}
         run: |
-          # Both write the Docker config, which the SBOM step reads too.
+          # Both write the Docker config, which crane and the SBOM step read.
           login=(ko login)
           if [ -n "$DOCKERFILE" ]; then login=(docker login); fi
           registry="${REPOSITORY%%/*}"
@@ -336,16 +358,21 @@ jobs:
         run: |
           set -euo pipefail
           repo="${REPOSITORY:-registry.invalid/build-check}"  # not ko.local: that would load into a Docker daemon
-          # A PR build with the gate also writes the image as an OCI layout,
-          # which the SBOM step reads, since nothing is pushed. The image and
-          # its digest are the same as without it.
+          # Neither builder pushes: with push, or with the gate, the build
+          # writes the image as an OCI layout, which the next steps push by
+          # digest or give Syft. The image and its digest are the same as
+          # without it.
           layout=""
-          if [ "$GATE" = "true" ] && [ "$PUSH" != "true" ]; then
+          if [ "$PUSH" = "true" ] || [ "$GATE" = "true" ]; then
             layout="${RUNNER_TEMP}/image-layout"
             echo "layout=${layout}" >> "$GITHUB_OUTPUT"
           fi
           if [ -z "$DOCKERFILE" ]; then
-            KO_DOCKER_REPO="$repo" ko build "$IMPORTPATH" --bare --platform="$PLATFORMS" --push="$PUSH" --sbom=none \
+            # ko names the layout like a repository, so its path must be one.
+            if [ -n "$layout" ] && ! [[ $layout =~ ^[a-z0-9_./-]+$ ]]; then
+              echo "::error::ko writes an OCI layout only to a path of lowercase letters, digits and _-./, not ${layout}"; exit 1
+            fi
+            KO_DOCKER_REPO="$repo" ko build "$IMPORTPATH" --bare --platform="$PLATFORMS" --push=false --sbom=none \
               --image-refs=image-refs.txt ${layout:+"--oci-layout-path=${layout}"}
             ref=$(head -n1 image-refs.txt)
             digest="${ref##*@}"
@@ -358,18 +385,66 @@ jobs:
             esac
             if [ ! -f "$file" ]; then echo "::error::dockerfile ${DOCKERFILE} is not a file"; exit 1; fi
             # The image's provenance and SBOM are the attestations below, so
-            # BuildKit adds none of its own. It pushes the tag ko pushes
-            # (latest) and nothing when push is false.
+            # BuildKit adds none of its own.
+            output="type=image,name=${repo}:latest,push=false,rewrite-timestamp=true"
+            if [ -n "$layout" ]; then output="type=oci,dest=${layout},tar=false,rewrite-timestamp=true"; fi
             docker buildx build --builder "$BUILDER" --file "$file" --platform "$PLATFORMS" \
               --build-arg "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" \
               --provenance=false --sbom=false --metadata-file "${RUNNER_TEMP}/buildkit-metadata.json" \
-              --output "type=image,name=${repo}:latest,push=${PUSH},rewrite-timestamp=true" \
-              ${layout:+--output "type=oci,dest=${layout},tar=false,rewrite-timestamp=true"} "$context"
+              --output "$output" "$context"
             digest=$(jq -er '."containerimage.digest"' "${RUNNER_TEMP}/buildkit-metadata.json")
           fi
           echo "image=${repo}@${digest}" >> "$GITHUB_OUTPUT"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "Built ${repo}@${digest} for ${PLATFORMS}" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: inputs.push || inputs.vulnerability-gate
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install crane and Grype
+        if: inputs.push || inputs.vulnerability-gate
+        working-directory: .
+        env:
+          PUSH: ${{ inputs.push }}
+          GATE: ${{ inputs.vulnerability-gate }}
+          CRANE_VERSION: ${{ inputs.crane-version }}
+          GRYPE_VERSION: ${{ inputs.grype-version }}
+        run: |
+          set -euo pipefail
+          # Built from source that the Go checksum database verifies, in
+          # module and build caches of their own: nothing restored or left
+          # by another job on the runner goes into either tool.
+          bin="${RUNNER_TEMP}/tools-bin"
+          export GOBIN="$bin" GOMODCACHE="${RUNNER_TEMP}/tools-gomodcache" GOCACHE="${RUNNER_TEMP}/tools-gocache" \
+            GOFLAGS=-modcacherw GOWORK=off
+          if [ "$PUSH" = "true" ]; then
+            go install "github.com/google/go-containerregistry/cmd/crane@${CRANE_VERSION}"
+          fi
+          if [ "$GATE" = "true" ]; then
+            go install -ldflags "-X main.version=${GRYPE_VERSION#v}" "github.com/anchore/grype/cmd/grype@${GRYPE_VERSION}"
+          fi
+          echo "$bin" >> "$GITHUB_PATH"
+
+      # By digest only: a reference with a digest makes crane push no tag.
+      # crane pushes the layout's one entry (the index, or the image) and
+      # prints the digest it pushed, which must be the build's.
+      - name: Push by digest
+        if: inputs.push
+        working-directory: .
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          LAYOUT: ${{ steps.build.outputs.layout }}
+        run: |
+          set -euo pipefail
+          pushed=$(crane push "$LAYOUT" "${REPOSITORY}@${DIGEST}")
+          if [ "${pushed##*@}" != "$DIGEST" ]; then
+            echo "::error::crane pushed ${pushed}, not the build's ${DIGEST}"; exit 1
+          fi
+          echo "Pushed ${pushed}, untagged" >> "$GITHUB_STEP_SUMMARY"
 
       # On push, Syft reads the published image, and this SBOM is the one
       # attested below. A PR build with the gate gives Syft the OCI layout of
@@ -379,35 +454,13 @@ jobs:
         if: inputs.push || inputs.vulnerability-gate
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
-          image: ${{ steps.build.outputs.layout && format('oci-dir:{0}', steps.build.outputs.layout) || steps.build.outputs.image }}
+          image: ${{ inputs.push && steps.build.outputs.image || format('oci-dir:{0}', steps.build.outputs.layout) }}
           format: cyclonedx-json
           output-file: sbom.cdx.json
           syft-version: ${{ inputs.syft-version }}
           config: ${{ inputs.syft-config }}
           upload-artifact: false
           dependency-snapshot: false
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: inputs.vulnerability-gate
-        with:
-          go-version: stable
-          cache: false
-
-      - name: Install Grype
-        if: inputs.vulnerability-gate
-        working-directory: .
-        env:
-          GRYPE_VERSION: ${{ inputs.grype-version }}
-        run: |
-          set -euo pipefail
-          # Built from source that the Go checksum database verifies, in
-          # module and build caches of its own: nothing restored or left by
-          # another job on the runner goes into the scanner.
-          bin="${RUNNER_TEMP}/grype-bin"
-          GOBIN="$bin" GOMODCACHE="${RUNNER_TEMP}/grype-gomodcache" GOCACHE="${RUNNER_TEMP}/grype-gocache" \
-            GOFLAGS=-modcacherw GOWORK=off \
-            go install -ldflags "-X main.version=${GRYPE_VERSION#v}" "github.com/anchore/grype/cmd/grype@${GRYPE_VERSION}"
-          echo "$bin" >> "$GITHUB_PATH"
 
       # Grype's exit status: 0 nothing at fail-on or above, 2 something is,
       # anything else an error (no database, an unreadable file), which
@@ -455,6 +508,9 @@ jobs:
           if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then
             echo "::error::Grype did not complete (exit status ${code}); see its log above"; exit 1
           fi
+          # Every later step checks this, so nothing is attested, signed or
+          # tagged after a failed gate, also under expect-failure.
+          if [ "$code" -eq 2 ]; then echo "failed=true" >> "$GITHUB_OUTPUT"; fi
 
           report="${RUNNER_TEMP}/grype.json"
           found=$(jq -r '[.matches[].vulnerability.id] | unique | join(" ")' "$report")
@@ -477,13 +533,13 @@ jobs:
             echo "::error::expected the gate to fail at ${FAIL_ON} or above"; exit 1
           fi
           if [ "$code" -eq 2 ]; then
-            echo "::error::the image has vulnerabilities at ${FAIL_ON} or above (see the table above), so it gets no attestations. Upgrade the component, or set the finding aside in vex or grype-config with a reason"
+            echo "::error::the image has vulnerabilities at ${FAIL_ON} or above (see the table above), so it gets no attestations and no tag. Upgrade the component, or set the finding aside in vex or grype-config with a reason"
             exit 1
           fi
 
       - name: Provenance attestation
         id: provenance
-        if: inputs.push
+        if: inputs.push && steps.gate.outputs.failed != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ inputs.repository }}
@@ -492,7 +548,7 @@ jobs:
 
       - name: SBOM attestation
         id: sbom-attestation
-        if: inputs.push
+        if: inputs.push && steps.gate.outputs.failed != 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ inputs.repository }}
@@ -502,12 +558,12 @@ jobs:
           push-to-registry: true
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: inputs.push
+        if: inputs.push && steps.gate.outputs.failed != 'true'
         with:
           cosign-release: ${{ inputs.cosign-release }}
 
       - name: Public-good attestations
-        if: inputs.push
+        if: inputs.push && steps.gate.outputs.failed != 'true'
         env:
           IMAGE: ${{ steps.build.outputs.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -545,7 +601,7 @@ jobs:
           echo "Signed the provenance and SBOM statements on public-good for ${IMAGE}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Sign with the OpenBao transit key
-        if: inputs.sign
+        if: inputs.sign && steps.gate.outputs.failed != 'true'
         env:
           OPENBAO_ADDR: ${{ inputs.openbao-addr }}
           AUTH_PATH: ${{ inputs.openbao-auth-path }}
@@ -563,6 +619,24 @@ jobs:
           # transparency log, which would expose the private repository's name.
           VAULT_ADDR="$OPENBAO_ADDR" VAULT_TOKEN="$token" \
             cosign sign --yes --tlog-upload=false --key "$KEY" "$IMAGE"
+
+      # Last: the tags move only to an image that passed the gate (when it
+      # runs) and got its attestations and signature. crane tag puts the
+      # digest's own manifest under each tag, so each tag names the digest.
+      - name: Tag
+        if: inputs.push && steps.gate.outputs.failed != 'true'
+        working-directory: .
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ inputs.tags }}
+        run: |
+          set -euo pipefail
+          read -r -d '' -a tags <<< "$TAGS" || true
+          for tag in "${tags[@]}"; do
+            crane tag "${REPOSITORY}@${DIGEST}" "$tag"
+            echo "Tagged ${REPOSITORY}:${tag} as ${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Remove the BuildKit builder
         if: always() && steps.buildkit.outputs.builder != ''
