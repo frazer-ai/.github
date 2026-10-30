@@ -98,6 +98,33 @@ jobs:
       platforms: linux/amd64
       push: true
 
+  # The dockerfile mode: BuildKit instead of ko, testdata/docker for both
+  # platforms (the fixture runs nothing, so it needs no emulation).
+  image-dockerfile:
+    uses: ./.github/workflows/image-build.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/docker
+      dockerfile: Dockerfile
+
+  # The dockerfile mode's publishing path, to the same test package as
+  # image-publish, and on the same events.
+  image-dockerfile-publish:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/image-build.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/docker
+      dockerfile: Dockerfile
+      repository: ghcr.io/frazer-ai/image-build-selftest
+      platforms: linux/amd64
+      push: true
+
   licences:
     uses: ./.github/workflows/license-gate.yml
     with:
@@ -150,7 +177,7 @@ jobs:
   required:
     name: required
     if: always()
-    needs: [workflows, go, web, tofu, image, image-publish, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
+    needs: [workflows, go, web, tofu, image, image-publish, image-dockerfile, image-dockerfile-publish, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -159,10 +186,10 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
           FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          # Every check passed; image-publish may be skipped only for a fork.
+          # Every check passed; the two publishing jobs may be skipped only for a fork.
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           if ! echo "$NEEDS" | jq -e --argjson fork "$FORK" \
-            'to_entries | all(.value.result == "success" or (.key == "image-publish" and $fork and .value.result == "skipped"))' > /dev/null; then
+            'to_entries | all(.value.result == "success" or ((.key == "image-publish" or .key == "image-dockerfile-publish") and $fork and .value.result == "skipped"))' > /dev/null; then
             echo "::error::a required check did not pass"
             exit 1
           fi

@@ -13,11 +13,11 @@ workflows every repository calls. Plan: task 1a in `docs`
 | `.github/workflows/go-check.yml` | Go gate: gofmt, `go mod tidy -diff`, vet, golangci-lint, race tests (shuffled, uncached), govulncheck |
 | `.github/workflows/web-check.yml` | Web gate: `pnpm install --frozen-lockfile`, then `typecheck lint format:check test build` when defined |
 | `.github/workflows/tofu-check.yml` | OpenTofu gate: fmt, init without a backend, validate, TFLint, Trivy config scan (digest-pinned, signature-verified image), `tofu test` |
-| `.github/workflows/image-build.yml` | The one image builder: ko, multi-arch; on push, provenance and SBOM attestations with actions/attest, and the same predicates attested again on Sigstore's public-good instance (Rekor) by cosign, which frazer-install verifies offline; signing with the OpenBao transit key |
+| `.github/workflows/image-build.yml` | The one image builder: ko for a Go package, or BuildKit (pinned by digest) for a `dockerfile` inside its build context, multi-arch; on push, provenance and SBOM attestations with actions/attest, and the same predicates attested again on Sigstore's public-good instance (Rekor) by cosign, which frazer-install verifies offline; signing with the OpenBao transit key |
 | `.github/workflows/scan.yml` | Security scanners: Betterleaks (a pull request's own commits; a pushed branch's history; every ref with `all-refs: true` for a scheduled run), OSV-Scanner (lockfiles), Trivy (vulnerabilities and misconfigurations) from its digest-pinned, signature-verified image |
 | `.github/workflows/names.yml` | Naming gates: no other cloud's region IDs in tracked files, Conventional Commit PR titles |
 | `.github/workflows/license-gate.yml` | Licence gate: Syft SBOM, SPDX allow-list, exceptions file, generated NOTICE |
-| `.github/workflows/self-check.yml` | This repository's CI: lints the workflows and runs each one against `testdata/`, including fixtures that must fail (`license-bad`, `vuln`), and publishes the fixture image to `ghcr.io/frazer-ai/image-build-selftest` with its attestations (not on a fork's pull request) |
+| `.github/workflows/self-check.yml` | This repository's CI: lints the workflows and runs each one against `testdata/`, including fixtures that must fail (`license-bad`, `vuln`), and publishes the fixture images, ko's and the Dockerfile's, to `ghcr.io/frazer-ai/image-build-selftest` with their attestations (not on a fork's pull request) |
 
 ## Using the workflows
 
@@ -34,6 +34,39 @@ jobs:
 
 Each workflow documents its inputs at the top. The same workflow runs in the
 pull-request check and in the release, so a release always ran what the PR ran.
+
+### An image from a Dockerfile
+
+`image-build` builds a Go package with ko (`importpath`). An image that is
+not one Go package gives `dockerfile` instead, relative to
+`working-directory`, which is its build context and must contain it. The
+image gets the same provenance, SBOM and signatures, with this workflow as
+the builder:
+
+```yaml
+jobs:
+  resolver:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: frazer-ai/.github/.github/workflows/image-build.yml@<sha> # v1
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: images/unbound
+      dockerfile: Dockerfile
+      repository: ghcr.io/frazer-ai/frazer-dns-resolver
+      platforms: linux/amd64
+      push: true
+```
+
+BuildKit runs from `moby/buildkit` pinned by digest (`buildkit-version`,
+`buildkit-digest`), and sets every layer file's time and the image's
+creation time to the commit's (`SOURCE_DATE_EPOCH`), so a Dockerfile whose
+inputs are pinned gives one image per commit. RUN steps execute on the
+runner's architecture and nothing installs emulation: build for the
+runner's platform, or cross-compile with `FROM --platform=$BUILDPLATFORM`.
 
 ### Renovate
 
