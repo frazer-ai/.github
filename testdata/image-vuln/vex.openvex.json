@@ -1,0 +1,16 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/frazer-ai/.github/blob/master/testdata/image-vuln/vex.openvex.json",
+  "author": "frazer-ai/.github self-check",
+  "timestamp": "2026-10-30T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": { "name": "CVE-2026-97206" },
+      "products": [{ "@id": "pkg:generic/unbound@1.26.0" }],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "Fixture: the DNS-over-QUIC code is not compiled in. self-check expects the gate to set this finding aside."
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 # Checks this repository: lints every workflow, validates the Renovate
 # config, and runs each shared workflow against the fixtures in testdata/,
-# including a licence-gate run that must fail. `required` is the one check
+# including runs that must fail (the licence gate, the scanners, the names
+# gate and image-build's vulnerability gate). `required` is the one check
 # the ruleset requires (repositories.md §9.4).
 name: self-check
 
@@ -125,6 +126,73 @@ jobs:
       platforms: linux/amd64
       push: true
 
+  # The vulnerability gate on a PR build (push: false): ko's fixture, for
+  # both platforms, read from the build's OCI layout. Nothing in it is at or
+  # above high.
+  image-gate:
+    uses: ./.github/workflows/image-build.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/go
+      importpath: ./cmd/hello
+      vulnerability-gate: true
+
+  # The gate must fail: testdata/image-vuln declares Unbound 1.26.0 in a
+  # CycloneDX fragment, which Syft reads only through syft-config. Its VEX
+  # document and its grype-config each set one finding aside, and
+  # image-gate-findings checks all three by ID.
+  image-gate-must-fail:
+    uses: ./.github/workflows/image-build.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/image-vuln
+      dockerfile: Dockerfile
+      syft-config: testdata/image-vuln/syft.yaml
+      vulnerability-gate: true
+      grype-config: testdata/image-vuln/grype.yaml
+      vex: testdata/image-vuln/vex.openvex.json
+      expect-failure: true
+
+  image-gate-findings:
+    name: The gate's findings on testdata/image-vuln
+    needs: image-gate-must-fail
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Reported CVE-2026-81642, set aside CVE-2026-97206 (vex) and CVE-2026-82717 (grype-config)
+        env:
+          FOUND: ${{ needs.image-gate-must-fail.outputs.vulnerabilities }}
+          IGNORED: ${{ needs.image-gate-must-fail.outputs.ignored-vulnerabilities }}
+        run: |
+          echo "reported: ${FOUND}"
+          echo "set aside: ${IGNORED}"
+          has() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
+          fail=0
+          if ! has "$FOUND" CVE-2026-81642; then echo "::error::CVE-2026-81642 was not reported"; fail=1; fi
+          for id in CVE-2026-97206 CVE-2026-82717; do
+            if has "$FOUND" "$id" || ! has "$IGNORED" "$id"; then echo "::error::${id} was not set aside"; fail=1; fi
+          done
+          exit "$fail"
+
+  # The publishing path with the gate: testdata/docker passes it, then gets
+  # its attestations, as in image-dockerfile-publish.
+  image-gate-publish:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/image-build.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/docker
+      dockerfile: Dockerfile
+      repository: ghcr.io/frazer-ai/image-build-selftest
+      platforms: linux/amd64
+      push: true
+      vulnerability-gate: true
+
   licences:
     uses: ./.github/workflows/license-gate.yml
     with:
@@ -177,7 +245,7 @@ jobs:
   required:
     name: required
     if: always()
-    needs: [workflows, go, web, tofu, image, image-publish, image-dockerfile, image-dockerfile-publish, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
+    needs: [workflows, go, web, tofu, image, image-publish, image-dockerfile, image-dockerfile-publish, image-gate, image-gate-must-fail, image-gate-findings, image-gate-publish, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -186,10 +254,10 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
           FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          # Every check passed; the two publishing jobs may be skipped only for a fork.
+          # Every check passed; the three publishing jobs may be skipped only for a fork.
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           if ! echo "$NEEDS" | jq -e --argjson fork "$FORK" \
-            'to_entries | all(.value.result == "success" or ((.key == "image-publish" or .key == "image-dockerfile-publish") and $fork and .value.result == "skipped"))' > /dev/null; then
+            'to_entries | all(.value.result == "success" or ((.key == "image-publish" or .key == "image-dockerfile-publish" or .key == "image-gate-publish") and $fork and .value.result == "skipped"))' > /dev/null; then
             echo "::error::a required check did not pass"
             exit 1
           fi

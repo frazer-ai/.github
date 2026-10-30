@@ -24,6 +24,25 @@
 #                (`hashivault://…`), after logging in to OpenBao with this
 #                job's GitHub OIDC token. The key never leaves OpenBao.
 #
+#   vulnerability-gate: true
+#                Grype checks the image's CycloneDX SBOM against its
+#                vulnerability database and fails the job at `fail-on`
+#                (high) or above, after the SBOM and before either
+#                attestation or the signature: a published image that fails
+#                is never attested, so verification and admission refuse it.
+#                It runs on a PR build too (push: false), which keeps an OCI
+#                layout of the build for Syft, so the PR shows the failure
+#                before it merges. Grype scans the SBOM, not the image: the
+#                SBOM carries what Syft found plus the image's own CycloneDX
+#                fragments (`syft-config` with `+sbom-cataloger`), such as
+#                frazer's Unbound, compiled from source, which nothing in the
+#                image's package databases names. `grype-config` (ignore
+#                rules, each with a reason) and `vex` (OpenVEX: not_affected
+#                or fixed) set findings aside. Grype is built with
+#                `go install`, so the Go checksum database verifies its
+#                source; its database comes from `grype-db-url`, fresh for
+#                each job and at most five days old.
+#
 # Signing goes live in task 1f, when OpenBao and Frazer Registry exist; until
 # then callers leave `sign` off.
 #
@@ -117,6 +136,53 @@ on:
         type: string
         # renovate: datasource=github-releases depName=anchore/syft
         default: v1.54.0
+      syft-config:
+        description: >-
+          Syft configuration file for the SBOM, relative to the repository
+          root, for example images/unbound/syft.yaml; empty uses Syft's
+          defaults
+        type: string
+        default: ""
+      vulnerability-gate:
+        description: >-
+          Scan the image's SBOM with Grype, on PR builds too, and fail at
+          fail-on or above before anything is attested
+        type: boolean
+        default: false
+      fail-on:
+        description: Lowest severity that fails the gate (negligible, low, medium, high or critical)
+        type: string
+        default: high
+      grype-config:
+        description: >-
+          Grype configuration file (ignore rules, each with a reason),
+          relative to the repository root; empty uses none, not even a
+          .grype.yaml that Grype would find by itself
+        type: string
+        default: ""
+      vex:
+        description: >-
+          OpenVEX documents, relative to the repository root and separated by
+          whitespace; Grype sets aside what they mark not_affected or fixed
+        type: string
+        default: ""
+      grype-version:
+        description: Grype version, built with go install
+        type: string
+        # renovate: datasource=github-releases depName=anchore/grype
+        default: v0.121.0
+      grype-db-url:
+        description: >-
+          Where Grype gets its vulnerability database: a listing's base URL
+          (Grype adds /v6/latest.json) or the listing's own URL
+        type: string
+        default: https://grype.anchore.io/databases
+      expect-failure:
+        description: >-
+          Self-test only. Pass only when the gate fails at fail-on; needs
+          vulnerability-gate, and never publishes
+        type: boolean
+        default: false
     secrets:
       registry-username:
         description: Username for a registry other than ghcr.io
@@ -131,6 +197,14 @@ on:
       digest:
         description: The image digest
         value: ${{ jobs.build.outputs.digest }}
+      vulnerabilities:
+        description: >-
+          The vulnerability IDs the gate reported, space-separated; empty
+          when it found none or did not run
+        value: ${{ jobs.build.outputs.vulnerabilities }}
+      ignored-vulnerabilities:
+        description: The vulnerability IDs that grype-config or vex set aside, space-separated
+        value: ${{ jobs.build.outputs.ignored-vulnerabilities }}
 
 # No permissions block on purpose: the job inherits the caller's. A PR build
 # (push: false) needs only `contents: read`. A publishing caller grants
@@ -146,6 +220,8 @@ jobs:
     outputs:
       image: ${{ steps.build.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
+      vulnerabilities: ${{ steps.gate.outputs.vulnerabilities }}
+      ignored-vulnerabilities: ${{ steps.gate.outputs.ignored-vulnerabilities }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -158,6 +234,12 @@ jobs:
           OPENBAO_ADDR: ${{ inputs.openbao-addr }}
           IMPORTPATH: ${{ inputs.importpath }}
           DOCKERFILE: ${{ inputs.dockerfile }}
+          GATE: ${{ inputs.vulnerability-gate }}
+          EXPECT_FAILURE: ${{ inputs.expect-failure }}
+          FAIL_ON: ${{ inputs.fail-on }}
+          SYFT_CONFIG: ${{ inputs.syft-config }}
+          GRYPE_CONFIG: ${{ inputs.grype-config }}
+          VEX: ${{ inputs.vex }}
         working-directory: .
         run: |
           if [ "$PUSH" = "true" ] && [ -z "$REPOSITORY" ]; then echo "::error::push needs a repository"; exit 1; fi
@@ -173,6 +255,27 @@ jobs:
               //*|*/../*) echo "::error::dockerfile must be a relative path inside working-directory"; exit 1 ;;
             esac
           fi
+          # The gate's settings take effect only with the gate, so a caller
+          # never believes in a gate that does not run.
+          if [ "$GATE" != "true" ] && [ -n "${GRYPE_CONFIG}${VEX}" ]; then
+            echo "::error::grype-config and vex need vulnerability-gate"; exit 1
+          fi
+          if [ "$EXPECT_FAILURE" = "true" ] && { [ "$GATE" != "true" ] || [ "$PUSH" = "true" ]; }; then
+            echo "::error::expect-failure needs vulnerability-gate and never publishes"; exit 1
+          fi
+          if [ "$GATE" = "true" ]; then
+            case "$FAIL_ON" in
+              negligible|low|medium|high|critical) ;;
+              *) echo "::error::fail-on must be negligible, low, medium, high or critical"; exit 1 ;;
+            esac
+          fi
+          # Configuration files are relative paths inside the repository.
+          read -r -d '' -a files <<< "${SYFT_CONFIG} ${GRYPE_CONFIG} ${VEX}" || true
+          for file in "${files[@]}"; do
+            case "/${file}/" in
+              //*|*/../*) echo "::error::${file}: syft-config, grype-config and vex are relative paths inside the repository"; exit 1 ;;
+            esac
+          done
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -229,12 +332,21 @@ jobs:
           REPOSITORY: ${{ inputs.repository }}
           PLATFORMS: ${{ inputs.platforms }}
           PUSH: ${{ inputs.push }}
+          GATE: ${{ inputs.vulnerability-gate }}
         run: |
           set -euo pipefail
           repo="${REPOSITORY:-registry.invalid/build-check}"  # not ko.local: that would load into a Docker daemon
+          # A PR build with the gate also writes the image as an OCI layout,
+          # which the SBOM step reads, since nothing is pushed. The image and
+          # its digest are the same as without it.
+          layout=""
+          if [ "$GATE" = "true" ] && [ "$PUSH" != "true" ]; then
+            layout="${RUNNER_TEMP}/image-layout"
+            echo "layout=${layout}" >> "$GITHUB_OUTPUT"
+          fi
           if [ -z "$DOCKERFILE" ]; then
             KO_DOCKER_REPO="$repo" ko build "$IMPORTPATH" --bare --platform="$PLATFORMS" --push="$PUSH" --sbom=none \
-              --image-refs=image-refs.txt
+              --image-refs=image-refs.txt ${layout:+"--oci-layout-path=${layout}"}
             ref=$(head -n1 image-refs.txt)
             digest="${ref##*@}"
           else
@@ -251,23 +363,123 @@ jobs:
             docker buildx build --builder "$BUILDER" --file "$file" --platform "$PLATFORMS" \
               --build-arg "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" \
               --provenance=false --sbom=false --metadata-file "${RUNNER_TEMP}/buildkit-metadata.json" \
-              --output "type=image,name=${repo}:latest,push=${PUSH},rewrite-timestamp=true" "$context"
+              --output "type=image,name=${repo}:latest,push=${PUSH},rewrite-timestamp=true" \
+              ${layout:+--output "type=oci,dest=${layout},tar=false,rewrite-timestamp=true"} "$context"
             digest=$(jq -er '."containerimage.digest"' "${RUNNER_TEMP}/buildkit-metadata.json")
           fi
           echo "image=${repo}@${digest}" >> "$GITHUB_OUTPUT"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "Built ${repo}@${digest} for ${PLATFORMS}" >> "$GITHUB_STEP_SUMMARY"
 
+      # On push, Syft reads the published image, and this SBOM is the one
+      # attested below. A PR build with the gate gives Syft the OCI layout of
+      # the same build. Of a multi-platform image, both read the runner's
+      # platform.
       - name: SBOM
-        if: inputs.push
+        if: inputs.push || inputs.vulnerability-gate
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
-          image: ${{ steps.build.outputs.image }}
+          image: ${{ steps.build.outputs.layout && format('oci-dir:{0}', steps.build.outputs.layout) || steps.build.outputs.image }}
           format: cyclonedx-json
           output-file: sbom.cdx.json
           syft-version: ${{ inputs.syft-version }}
+          config: ${{ inputs.syft-config }}
           upload-artifact: false
           dependency-snapshot: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: inputs.vulnerability-gate
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install Grype
+        if: inputs.vulnerability-gate
+        working-directory: .
+        env:
+          GRYPE_VERSION: ${{ inputs.grype-version }}
+        run: |
+          set -euo pipefail
+          # Built from source that the Go checksum database verifies, in
+          # module and build caches of its own: nothing restored or left by
+          # another job on the runner goes into the scanner.
+          bin="${RUNNER_TEMP}/grype-bin"
+          GOBIN="$bin" GOMODCACHE="${RUNNER_TEMP}/grype-gomodcache" GOCACHE="${RUNNER_TEMP}/grype-gocache" \
+            GOFLAGS=-modcacherw GOWORK=off \
+            go install -ldflags "-X main.version=${GRYPE_VERSION#v}" "github.com/anchore/grype/cmd/grype@${GRYPE_VERSION}"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      # Grype's exit status: 0 nothing at fail-on or above, 2 something is,
+      # anything else an error (no database, an unreadable file), which
+      # fails the gate in either mode.
+      - name: Vulnerability gate
+        id: gate
+        if: inputs.vulnerability-gate
+        working-directory: .
+        env:
+          FAIL_ON: ${{ inputs.fail-on }}
+          CONFIG: ${{ inputs.grype-config }}
+          VEX: ${{ inputs.vex }}
+          EXPECT_FAILURE: ${{ inputs.expect-failure }}
+          # The database: from grype-db-url, into a directory of this job's
+          # own, checked against the listing on every run and refused when
+          # the listing cannot be read or the database is more than five
+          # days old. Set here, so a grype-config cannot change them.
+          GRYPE_DB_UPDATE_URL: ${{ inputs.grype-db-url }}
+          GRYPE_DB_AUTO_UPDATE: "true"
+          GRYPE_DB_MAX_UPDATE_CHECK_FREQUENCY: 0s
+          GRYPE_DB_REQUIRE_UPDATE_CHECK: "true"
+          GRYPE_DB_VALIDATE_AGE: "true"
+          GRYPE_DB_MAX_ALLOWED_BUILT_AGE: 120h
+          GRYPE_DB_VALIDATE_BY_HASH_ON_START: "true"
+          GRYPE_CHECK_FOR_APP_UPDATE: "false"
+        run: |
+          set -euo pipefail
+          export GRYPE_DB_CACHE_DIR="${RUNNER_TEMP}/grype-db"
+          # Grype searches the working directory and the home directory for
+          # a configuration when given none, so it always gets one: the
+          # caller's, or an empty file.
+          config="${RUNNER_TEMP}/grype-no-config.yaml"
+          if [ -n "$CONFIG" ]; then config="$CONFIG"; else : > "$config"; fi
+          read -r -d '' -a vex_files <<< "$VEX" || true
+          for file in "$config" "${vex_files[@]}"; do
+            if [ ! -f "$file" ]; then echo "::error::${file} does not exist"; exit 1; fi
+          done
+          args=(--config "$config" --fail-on "$FAIL_ON" --output table --output "json=${RUNNER_TEMP}/grype.json")
+          for file in "${vex_files[@]}"; do args+=(--vex "$file"); done
+
+          set +e
+          grype sbom:sbom.cdx.json "${args[@]}"
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then
+            echo "::error::Grype did not complete (exit status ${code}); see its log above"; exit 1
+          fi
+
+          report="${RUNNER_TEMP}/grype.json"
+          found=$(jq -r '[.matches[].vulnerability.id] | unique | join(" ")' "$report")
+          ignored=$(jq -r '[(.ignoredMatches // [])[].vulnerability.id] | unique | join(" ")' "$report")
+          echo "vulnerabilities=${found}" >> "$GITHUB_OUTPUT"
+          echo "ignored-vulnerabilities=${ignored}" >> "$GITHUB_OUTPUT"
+          {
+            jq -r '.descriptor.db.status | "Grype database built \(.built), from \(.from | split("?")[0])"' "$report"
+            echo
+            echo "| Vulnerability | Severity | Package | Version | Fixed in |"
+            echo "|---|---|---|---|---|"
+            jq -r '.matches[] | "| \(.vulnerability.id) | \(.vulnerability.severity) | \(.artifact.name) | \(.artifact.version) | \((.vulnerability.fix.versions // []) | join(", ")) |"' "$report"
+            echo
+            echo "Set aside by grype-config or vex: ${ignored:-none}"
+            jq -r '(.ignoredMatches // [])[] | "- \(.vulnerability.id) in \(.artifact.name) \(.artifact.version): \([.appliedIgnoreRules[] | .reason // "vex \(.["vex-status"]) \(.["vex-justification"] // "")"] | join("; "))"' "$report"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$EXPECT_FAILURE" = "true" ]; then
+            if [ "$code" -eq 2 ]; then echo "The gate failed at ${FAIL_ON} or above, as expected."; exit 0; fi
+            echo "::error::expected the gate to fail at ${FAIL_ON} or above"; exit 1
+          fi
+          if [ "$code" -eq 2 ]; then
+            echo "::error::the image has vulnerabilities at ${FAIL_ON} or above (see the table above), so it gets no attestations. Upgrade the component, or set the finding aside in vex or grype-config with a reason"
+            exit 1
+          fi
 
       - name: Provenance attestation
         id: provenance
