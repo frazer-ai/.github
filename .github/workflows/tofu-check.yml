@@ -82,9 +82,20 @@ jobs:
           cosign verify "$image" \
             --certificate-identity "https://github.com/aquasecurity/trivy/.github/workflows/reusable-release.yaml@refs/tags/v${TRIVY_VERSION}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          # Trivy reads its databases and its checks bundle from GHCR only
+          # (by default it tries mirror.gcr.io first), and sends no request to
+          # check.trivy.dev, which it skips only when both the version check
+          # and telemetry are off. A job re-run with debug logging
+          # (RUNNER_DEBUG) runs Trivy with --debug too.
+          debug=""
+          if [ "${RUNNER_DEBUG:-}" = "1" ]; then debug="-e TRIVY_DEBUG=true"; fi
           cat > "$bin/trivy" <<SH
           #!/usr/bin/env bash
-          exec docker run --rm -v "\$PWD:/src:ro" -w /src -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" "$image" "\$@"
+          exec docker run --rm -v "\$PWD:/src:ro" -w /src -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \\
+            -e TRIVY_DB_REPOSITORY=ghcr.io/aquasecurity/trivy-db:2 \\
+            -e TRIVY_JAVA_DB_REPOSITORY=ghcr.io/aquasecurity/trivy-java-db:1 \\
+            -e TRIVY_CHECKS_BUNDLE_REPOSITORY=ghcr.io/aquasecurity/trivy-checks:2 \\
+            -e TRIVY_SKIP_VERSION_CHECK=true -e TRIVY_DISABLE_TELEMETRY=true $debug "$image" "\$@"
           SH
           chmod +x "$bin/trivy"
           echo "$bin" >> "$GITHUB_PATH"
