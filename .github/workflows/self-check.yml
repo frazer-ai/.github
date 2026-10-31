@@ -115,6 +115,62 @@ jobs:
       # latest, and a tag of this run's own that image-gate-tags checks.
       tags: latest selftest-${{ github.run_id }}-${{ github.run_attempt }}-ko
 
+  # A PR build (push: false) on a base image that is a private ghcr.io
+  # package: testdata/private-base's .ko.yaml takes the image image-publish
+  # just pushed, which this repository's workflows may read. ko pulls it
+  # with the login every build makes and this job's `packages: read`.
+  image-private-base:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: image-publish
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/image-build.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/private-base
+      importpath: .
+      platforms: linux/amd64
+
+  # Its control: a token without `packages: read` gets no manifest of that
+  # base, so image-private-base passes through its grant and the login, not
+  # because the package is public.
+  image-private-base-refused:
+    name: The private base is refused without packages read
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: image-publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: No manifest without packages read
+        env:
+          REPOSITORY: frazer-ai/image-build-selftest
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GHCR may refuse the pull token itself, or issue one that the
+          # manifest then refuses; either is the refusal. A network error
+          # fails the step.
+          code=$(curl -sS -o "$RUNNER_TEMP/token.json" -w '%{http_code}' -u "x:${GH_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPOSITORY}:pull")
+          auth=()
+          if [ "$code" = "200" ]; then
+            token=$(jq -r '.token // empty' "$RUNNER_TEMP/token.json")
+            if [ -n "$token" ]; then
+              echo "::add-mask::${token}"
+              auth=(-H "Authorization: Bearer ${token}")
+            fi
+          fi
+          rm -f "$RUNNER_TEMP/token.json"
+          accept="application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json"
+          status=$(curl -sS -o /dev/null -I "${auth[@]}" -H "Accept: ${accept}" \
+            -w '%{http_code}' "https://ghcr.io/v2/${REPOSITORY}/manifests/latest")
+          case "$status" in
+            401|403|404) echo "refused: the token request answered ${code}, the manifest ${status}, as required" ;;
+            200) echo "::error::ghcr.io/${REPOSITORY}:latest was served to a token without packages read"; exit 1 ;;
+            *) echo "::error::the manifest request answered ${status}, neither a refusal nor the image"; exit 1 ;;
+          esac
+
   # The dockerfile mode: BuildKit instead of ko, testdata/docker for both
   # platforms (the fixture runs nothing, so it needs no emulation).
   image-dockerfile:
@@ -361,7 +417,7 @@ jobs:
   required:
     name: required
     if: always()
-    needs: [workflows, go, go-tools, web, tofu, image, image-publish, image-dockerfile, image-dockerfile-publish, image-gate, image-gate-must-fail, image-gate-findings, image-gate-publish, image-gate-must-fail-publish, image-gate-must-fail-publish-ko, image-gate-tags, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
+    needs: [workflows, go, go-tools, web, tofu, image, image-publish, image-private-base, image-private-base-refused, image-dockerfile, image-dockerfile-publish, image-gate, image-gate-must-fail, image-gate-findings, image-gate-publish, image-gate-must-fail-publish, image-gate-must-fail-publish-ko, image-gate-tags, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -370,10 +426,10 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
           FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          # Every check passed; the publishing jobs and image-gate-tags may be skipped only for a fork.
+          # Every check passed; the publishing jobs, the private-base jobs and image-gate-tags may be skipped only for a fork.
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           if ! echo "$NEEDS" | jq -e --argjson fork "$FORK" \
-            'to_entries | all(.value.result == "success" or ((.key | IN("image-publish", "image-dockerfile-publish", "image-gate-publish", "image-gate-must-fail-publish", "image-gate-must-fail-publish-ko", "image-gate-tags")) and $fork and .value.result == "skipped"))' > /dev/null; then
+            'to_entries | all(.value.result == "success" or ((.key | IN("image-publish", "image-private-base", "image-private-base-refused", "image-dockerfile-publish", "image-gate-publish", "image-gate-must-fail-publish", "image-gate-must-fail-publish-ko", "image-gate-tags")) and $fork and .value.result == "skipped"))' > /dev/null; then
             echo "::error::a required check did not pass"
             exit 1
           fi
