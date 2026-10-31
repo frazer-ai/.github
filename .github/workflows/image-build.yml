@@ -224,7 +224,8 @@ on:
         value: ${{ jobs.build.outputs.ignored-vulnerabilities }}
 
 # No permissions block on purpose: the job inherits the caller's. A PR build
-# (push: false) needs only `contents: read`. A publishing caller grants
+# (push: false) needs `contents: read`, and `packages: read` as well when its
+# base image is a private ghcr.io package. A publishing caller grants
 # `contents: read`, `packages: write` (GHCR), `id-token: write` (attestations,
 # public-good signing and OpenBao) and `attestations: write` on the calling
 # job.
@@ -326,22 +327,30 @@ jobs:
           docker buildx create --name "$builder" --driver docker-container \
             --driver-opt "image=docker.io/moby/buildkit:${BUILDKIT_VERSION}@${BUILDKIT_DIGEST}" --bootstrap
 
+      # Every build logs in to ghcr.io with the job's token, a PR build
+      # (push: false) too, so that a base image which is a private ghcr.io
+      # package can be pulled: the caller grants `packages: read`, and the
+      # package grants the caller's repository read access (it has that
+      # already when a workflow of the same repository published it). With
+      # push, the same login pushes to ghcr.io; another registry logs in with
+      # the secrets.
       - name: Registry login
-        if: inputs.push
         env:
+          PUSH: ${{ inputs.push }}
           REPOSITORY: ${{ inputs.repository }}
           DOCKERFILE: ${{ inputs.dockerfile }}
           GITHUB_TOKEN: ${{ github.token }}
           REGISTRY_USERNAME: ${{ secrets.registry-username }}
           REGISTRY_PASSWORD: ${{ secrets.registry-password }}
         run: |
-          # Both write the Docker config, which crane and the SBOM step read.
+          set -euo pipefail
+          # Both write the Docker config, which ko, BuildKit, crane and the
+          # SBOM step read.
           login=(ko login)
           if [ -n "$DOCKERFILE" ]; then login=(docker login); fi
+          printf '%s' "$GITHUB_TOKEN" | "${login[@]}" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           registry="${REPOSITORY%%/*}"
-          if [ "$registry" = "ghcr.io" ]; then
-            printf '%s' "$GITHUB_TOKEN" | "${login[@]}" ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          else
+          if [ "$PUSH" = "true" ] && [ "$registry" != "ghcr.io" ]; then
             printf '%s' "$REGISTRY_PASSWORD" | "${login[@]}" "$registry" -u "$REGISTRY_USERNAME" --password-stdin
           fi
 
