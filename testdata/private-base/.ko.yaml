@@ -1,0 +1,4 @@
+# The private package that self-check's image-publish pushes, which this
+# repository's workflows may read: a tag rather than a digest, since every
+# run publishes a new one (image-publish moves latest last).
+defaultBaseImage: ghcr.io/frazer-ai/image-build-selftest:latest
