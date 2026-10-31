@@ -10,7 +10,7 @@ workflows every repository calls. Plan: task 1a in `docs`
 | `profile/README.md` | The public org profile |
 | `SECURITY.md`, `.github/pull_request_template.md`, `.github/ISSUE_TEMPLATE/` | Defaults for every repository without its own |
 | `renovate-config.json` | The shared Renovate preset |
-| `.github/workflows/go-check.yml` | Go gate: gofmt, `go mod tidy -diff`, vet, golangci-lint, race tests (shuffled, uncached), govulncheck |
+| `.github/workflows/go-check.yml` | Go gate: gofmt, `go mod tidy -diff`, vet, golangci-lint, race tests (shuffled, uncached), govulncheck; with `tools`, the tests' tools at the caller's `mise.toml` versions |
 | `.github/workflows/web-check.yml` | Web gate: `pnpm install --frozen-lockfile`, then `typecheck lint format:check test build` when defined |
 | `.github/workflows/tofu-check.yml` | OpenTofu gate: fmt, init without a backend, validate, TFLint, Trivy config scan (digest-pinned, signature-verified image; its checks bundle from GHCR only, no version check or telemetry), `tofu test` |
 | `.github/workflows/image-build.yml` | The one image builder: ko for a Go package, or BuildKit (pinned by digest) for a `dockerfile` inside its build context, multi-arch; on push, the image pushed by digest (crane), provenance and SBOM attestations with actions/attest, and the same predicates attested again on Sigstore's public-good instance (Rekor) by cosign, which frazer-install verifies offline; signing with the OpenBao transit key, and only then its `tags` (latest); with `vulnerability-gate`, Grype checks the image's CycloneDX SBOM before anything is attested or tagged, on PR builds too |
@@ -34,6 +34,30 @@ jobs:
 
 Each workflow documents its inputs at the top. The same workflow runs in the
 pull-request check and in the release, so a release always ran what the PR ran.
+
+### Tools for the tests
+
+Tests that run a tool, such as `helm template` in a chart test, name it in
+go-check's `tools` input. Each line gives a key of the caller's `mise.toml`
+`[tools]` table and the Go package that builds the tool:
+
+```yaml
+jobs:
+  go:
+    uses: frazer-ai/.github/.github/workflows/go-check.yml@<sha>
+    with:
+      tools: |
+        helm helm.sh/helm/v4/cmd/helm
+```
+
+The test job runs `go install <package>@v<version>` with the version
+`mise.toml` pins, which must be exact. The binary goes into the job's own
+`$RUNNER_TEMP/bin`, which comes first on PATH. A step then checks that each
+tool resolves there and lists the tools in the job summary. On a self-hosted
+runner, `~/go/bin` keeps what earlier jobs installed. A tool installed this
+way never comes from there, and is never another version than the pinned one.
+`mise-toml` names another manifest, relative to the repository root. The
+`go-tools` self-check proves the input on `testdata/go-tools`.
 
 ### An image from a Dockerfile
 
