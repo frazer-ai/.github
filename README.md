@@ -17,7 +17,7 @@ workflows every repository calls. Plan: task 1a in `docs`
 | `.github/workflows/scan.yml` | Security scanners: Betterleaks (a pull request's own commits; a pushed branch's history; every ref with `all-refs: true` for a scheduled run), OSV-Scanner (lockfiles), Trivy (vulnerabilities and misconfigurations) from its digest-pinned, signature-verified image, with its databases and checks bundle from GHCR only (not mirror.gcr.io) and no request to check.trivy.dev |
 | `.github/workflows/names.yml` | Naming gates: no other cloud's region IDs in tracked files, Conventional Commit PR titles |
 | `.github/workflows/license-gate.yml` | Licence gate: Syft SBOM, SPDX allow-list, exceptions file, generated NOTICE |
-| `.github/workflows/self-check.yml` | This repository's CI: lints the workflows and runs each one against `testdata/`, including fixtures that must fail (`license-bad`, `vuln`, `image-vuln`; the last is also published, and must get no tag and no attestation), and publishes the fixture images, ko's and the Dockerfile's, to `ghcr.io/frazer-ai/image-build-selftest` with their attestations (not on a fork's pull request) |
+| `.github/workflows/self-check.yml` | This repository's CI: lints the workflows and runs each one against `testdata/`, including fixtures that must fail (`license-bad`, `vuln`, `image-vuln`; the last is also published, and must get no tag and no attestation), publishes the fixture images, ko's and the Dockerfile's, to `ghcr.io/frazer-ai/image-build-selftest` with their attestations, and builds a ko fixture on that private package as its base, which a token without `packages: read` must not read (not on a fork's pull request) |
 
 ## Using the workflows
 
@@ -67,6 +67,28 @@ creation time to the commit's (`SOURCE_DATE_EPOCH`), so a Dockerfile whose
 inputs are pinned gives one image per commit. RUN steps execute on the
 runner's architecture and nothing installs emulation: build for the
 runner's platform, or cross-compile with `FROM --platform=$BUILDPLATFORM`.
+
+### A private base image
+
+Every build, a PR build (`push: false`) too, logs in to ghcr.io with the
+job's token, so a base image that is a private ghcr.io package can be
+pulled. The calling job grants `packages: read`:
+
+```yaml
+jobs:
+  image:
+    permissions:
+      contents: read
+      packages: read
+    uses: frazer-ai/.github/.github/workflows/image-build.yml@<sha> # v1
+    with:
+      importpath: ./cmd/frazer-api
+```
+
+The package must also grant the calling repository read access. A package
+that a workflow of the same repository published already has it. For any
+other repository, add it in the package's settings, under Manage Actions
+access.
 
 ### A vulnerability gate
 
