@@ -59,6 +59,20 @@ jobs:
       working-directory: testdata/go
       artifact-name: go-fixture-test-report
 
+  # go-check's tools input: the fixture's test finds helm only in this job's
+  # $RUNNER_TEMP/bin, built at the version its mise.toml pins. GitHub's image
+  # has its own helm in /usr/local/bin, so the test fails if the input
+  # installs nothing or loses to that one on PATH.
+  go-tools:
+    uses: ./.github/workflows/go-check.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/go-tools
+      mise-toml: testdata/go-tools/mise.toml
+      tools: |
+        helm helm.sh/helm/v4/cmd/helm
+      artifact-name: go-tools-fixture-test-report
+
   web:
     uses: ./.github/workflows/web-check.yml
     with:
@@ -347,7 +361,7 @@ jobs:
   required:
     name: required
     if: always()
-    needs: [workflows, go, web, tofu, image, image-publish, image-dockerfile, image-dockerfile-publish, image-gate, image-gate-must-fail, image-gate-findings, image-gate-publish, image-gate-must-fail-publish, image-gate-must-fail-publish-ko, image-gate-tags, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
+    needs: [workflows, go, go-tools, web, tofu, image, image-publish, image-dockerfile, image-dockerfile-publish, image-gate, image-gate-must-fail, image-gate-findings, image-gate-publish, image-gate-must-fail-publish, image-gate-must-fail-publish-ko, image-gate-tags, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -43,6 +43,19 @@ on:
         description: Name of the uploaded test report (unique per run)
         type: string
         default: go-test-report
+      tools:
+        description: >-
+          Tools the tests run, one per line as "<mise.toml key> <Go package>"
+          (for example "helm helm.sh/helm/v4/cmd/helm"). The test job installs
+          each with go install, at the exact version the caller's mise.toml
+          pins for that key, into its own $RUNNER_TEMP/bin, first on PATH.
+          Empty: none.
+        type: string
+        default: ""
+      mise-toml:
+        description: The caller's mise.toml that pins the tools, relative to the repository root
+        type: string
+        default: mise.toml
 
 permissions:
   contents: read
@@ -94,6 +107,67 @@ jobs:
         with:
           go-version-file: ${{ inputs.working-directory }}/go.mod
           cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      # The tests' tools, each at the version the caller's mise.toml pins, in
+      # this job's own $RUNNER_TEMP/bin. A self-hosted runner keeps ~/go/bin
+      # from job to job, so a tool another job left there could otherwise
+      # pass a test this job never installed it for, at any version.
+      - name: Install the tests' tools (versions from mise.toml)
+        if: inputs.tools != ''
+        env:
+          TOOLS: ${{ inputs.tools }}
+          MISE_TOML: ${{ inputs.mise-toml }}
+          # Prints [tools].<key>'s version from mise.toml: a string, or a
+          # table's version.
+          READ_VERSION: |
+            import sys, tomllib
+            with open(sys.argv[1], "rb") as f:
+                tools = tomllib.load(f).get("tools", {})
+            v = tools.get(sys.argv[2])
+            if isinstance(v, dict):
+                v = v.get("version")
+            if not isinstance(v, str) or not v:
+                sys.exit(f"{sys.argv[1]} pins no version for {sys.argv[2]!r} in [tools]")
+            print(v)
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          manifest="$GITHUB_WORKSPACE/$MISE_TOML"
+          : > "$RUNNER_TEMP/go-check-tools"
+          while read -r key pkg extra; do
+            case "$key" in ''|'#'*) continue ;; esac
+            if [ -z "$pkg" ] || [ -n "$extra" ]; then
+              echo "::error::tools: want \"<mise.toml key> <Go package>\" on each line, got \"$key $pkg $extra\""; exit 1
+            fi
+            if ! [[ "$pkg" =~ ^[A-Za-z0-9._~/-]+$ ]]; then
+              echo "::error::tools: $pkg is not a Go package path"; exit 1
+            fi
+            version=$(python3 -c "$READ_VERSION" "$manifest" "$key")
+            # An exact version only: not latest, a prefix or a range.
+            if ! [[ "$version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then
+              echo "::error::tools: ${MISE_TOML} pins ${key} at \"${version}\", not an exact version"; exit 1
+            fi
+            version="v${version#v}"
+            # go install names the binary after the package's last element,
+            # or the one before a major-version suffix (/v4).
+            name="${pkg##*/}"
+            if [[ "$name" =~ ^v[0-9]+$ ]]; then rest="${pkg%/*}"; name="${rest##*/}"; fi
+            GOBIN="$bin" go install "${pkg}@${version}"
+            echo "$name $version $pkg" >> "$RUNNER_TEMP/go-check-tools"
+          done <<< "$TOOLS"
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: The tests' tools resolve to this job's install
+        if: inputs.tools != ''
+        run: |
+          set -euo pipefail
+          echo "### Tools on PATH for go test" >> "$GITHUB_STEP_SUMMARY"
+          while read -r name version pkg; do
+            got=$(command -v "$name" || true)
+            if [ "$got" != "$RUNNER_TEMP/bin/$name" ]; then
+              echo "::error::$name resolves to ${got:-nothing}, not this job's $RUNNER_TEMP/bin/$name"; exit 1
+            fi
+            echo "- \`$name\` $version (\`$pkg\`): \`$got\`" | tee -a "$GITHUB_STEP_SUMMARY"
+          done < "$RUNNER_TEMP/go-check-tools"
       # Shuffled and uncached; no retry-to-green.
       - name: go test
         env:
