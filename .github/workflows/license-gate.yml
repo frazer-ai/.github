@@ -117,13 +117,13 @@ jobs:
         # "python: command not found".
         shell: python3 {0}
         run: |
-          import json, os, re, subprocess, sys
+          import glob, json, os, re, subprocess, sys, tomllib
           from pathlib import Path
 
           wd = Path(os.environ["WD"])
           allow = set(os.environ["ALLOW"].split())
 
-          # First-party names: every Go module and package.json name in the tree.
+          # First-party names: every Go module and package.json name in the tree, and Cargo's.
           first_party = set()
           for f in wd.rglob("go.mod"):
               if "node_modules" in f.parts:
@@ -137,6 +137,17 @@ jobs:
               name = json.loads(f.read_text()).get("name")
               if name:
                   first_party.add(name)
+
+          # Cargo's are each workspace's own packages: a vendored crate's manifest is in
+          # the tree too, and stays third-party.
+          for lock in wd.rglob("Cargo.lock"):
+              workspace = tomllib.loads(lock.with_name("Cargo.toml").read_text()).get("workspace", {})
+              members = {lock.parent, *(Path(m) for g in workspace.get("members", []) for m in glob.glob(str(lock.parent / g)))}
+              for member in members - {lock.parent / e for e in workspace.get("exclude", [])}:
+                  f = member / "Cargo.toml"
+                  name = tomllib.loads(f.read_text()).get("package", {}).get("name") if f.is_file() else None
+                  if name:
+                      first_party.add(name)
 
           exceptions = set()
           ex = Path(os.environ["EXCEPTIONS_FILE"])
@@ -193,6 +204,35 @@ jobs:
 
           sbom = json.loads(Path("sbom.cdx.json").read_text())
           rows, violations = set(), 0
+          # One list: crates are cargo-deny's to check (below), so each Cargo.lock in the
+          # tree needs a deny.toml beside it, allowing nothing this gate does not. A
+          # per-crate exception past the list needs the crate in the exceptions file too.
+          for lock in wd.rglob("Cargo.lock"):
+              deny = lock.with_name("deny.toml")
+              if not deny.is_file():
+                  print(f"::error title=No licence policy::{lock} has no deny.toml beside it, so nothing checks its crates' licences")
+                  violations += 1
+                  continue
+              policy = tomllib.loads(deny.read_text()).get("licenses", {})
+              for name in sorted(x for x in policy.get("allow", []) if not allowed(x)):
+                  print(f"::error title=Licence not allowed::{deny} allows {name}, which this gate does not")
+                  violations += 1
+              granted = policy.get("exceptions", [])
+              # cargo-deny adds the nearest of these at or above the workspace.
+              here = lock.parent.resolve()
+              near = (d / n for d in (here, *here.parents) for n in ("deny.exceptions.toml", ".deny.exceptions.toml", ".cargo/deny.exceptions.toml"))
+              extra = next((f for f in near if f.is_file()), None)
+              if extra:
+                  granted = granted + tomllib.loads(extra.read_text()).get("exceptions", [])
+              # cargo-deny pins name@version. name:range and a version field are ranges, so
+              # only the crate's wildcard line in the exceptions file covers those.
+              for e in granted:
+                  spec = e.get("crate") or e.get("name")
+                  if {re.split("[@:]", spec)[0] + "@*", spec} & exceptions:
+                      continue
+                  for name in sorted(x for x in e.get("allow", []) if not allowed(x)):
+                      print(f"::error title=Licence not allowed::the cargo-deny policy for {lock} excepts {spec} for {name}, which neither this gate's list nor the exceptions file does")
+                      violations += 1
           for c in sbom.get("components", []):
               if c.get("type") not in ("library", "framework"):
                   continue
@@ -211,6 +251,12 @@ jobs:
                       exprs.append(e)
               licences = " AND ".join(f"({e})" if " " in e else e for e in exprs)
               rows.add(f"{name} {version}: {licences or 'UNKNOWN'}")
+              # Cargo.lock carries no licences and Syft looks none up, so a crate's
+              # licence is cargo-deny's to check, over the same list (make rust-check in
+              # the caller; frazer's tools/rustpins holds its list to this one). Syft also
+              # reads crates out of binaries, and no policy stands behind those.
+              if props.get("syft:package:foundBy") == "rust-cargo-lock-cataloger":
+                  continue
               if f"{name}@{version}" in exceptions or f"{name}@*" in exceptions:
                   continue
               if not licences:
