@@ -117,13 +117,13 @@ jobs:
         # "python: command not found".
         shell: python3 {0}
         run: |
-          import json, os, re, subprocess, sys
+          import json, os, re, subprocess, sys, tomllib
           from pathlib import Path
 
           wd = Path(os.environ["WD"])
           allow = set(os.environ["ALLOW"].split())
 
-          # First-party names: every Go module and package.json name in the tree.
+          # First-party names: every Go module, package.json and Cargo package name in the tree.
           first_party = set()
           for f in wd.rglob("go.mod"):
               if "node_modules" in f.parts:
@@ -135,6 +135,13 @@ jobs:
               if "node_modules" in f.parts:
                   continue
               name = json.loads(f.read_text()).get("name")
+              if name:
+                  first_party.add(name)
+
+          for f in wd.rglob("Cargo.toml"):
+              if "target" in f.parts:
+                  continue
+              name = tomllib.loads(f.read_text()).get("package", {}).get("name")
               if name:
                   first_party.add(name)
 
@@ -193,6 +200,12 @@ jobs:
 
           sbom = json.loads(Path("sbom.cdx.json").read_text())
           rows, violations = set(), 0
+          # One list: a caller's rust/deny.toml allows nothing this gate does not.
+          deny = wd / "rust" / "deny.toml"
+          if deny.is_file():
+              for name in sorted(set(tomllib.loads(deny.read_text()).get("licenses", {}).get("allow", [])) - allow):
+                  print(f"::error title=Licence not allowed::rust/deny.toml allows {name}, which this gate does not")
+                  violations += 1
           for c in sbom.get("components", []):
               if c.get("type") not in ("library", "framework"):
                   continue
@@ -211,6 +224,11 @@ jobs:
                       exprs.append(e)
               licences = " AND ".join(f"({e})" if " " in e else e for e in exprs)
               rows.add(f"{name} {version}: {licences or 'UNKNOWN'}")
+              # Cargo.lock carries no licences and Syft looks none up, so a crate's
+              # licence is cargo-deny's to check, over the same list (make rust-check in
+              # the caller; frazer's tools/rustpins holds its list to this one).
+              if c.get("purl", "").startswith("pkg:cargo/"):
+                  continue
               if f"{name}@{version}" in exceptions or f"{name}@*" in exceptions:
                   continue
               if not licences:
