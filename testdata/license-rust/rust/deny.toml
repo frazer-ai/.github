@@ -1,0 +1,3 @@
+# The licence list a caller keeps: nothing the gate does not allow.
+[licenses]
+allow = ["Apache-2.0", "MIT"]

@@ -388,6 +388,23 @@ jobs:
       artifact-name: license-gate-bad-fixture
       expect-failure: true
 
+  # A Cargo workspace: its crates are cargo-deny's, and its private crate is by name.
+  licences-rust:
+    uses: ./.github/workflows/license-gate.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/license-rust
+      artifact-name: license-gate-rust-fixture
+
+  # The same workspace, with a rust/deny.toml that allows more than the gate.
+  licences-rust-must-fail:
+    uses: ./.github/workflows/license-gate.yml
+    with:
+      runs-on: ubuntu-24.04
+      working-directory: testdata/license-rust-bad
+      artifact-name: license-gate-rust-bad-fixture
+      expect-failure: true
+
   scan:
     uses: ./.github/workflows/scan.yml
     with:
@@ -417,7 +434,7 @@ jobs:
   required:
     name: required
     if: always()
-    needs: [workflows, go, go-tools, web, tofu, image, image-publish, image-private-base, image-private-base-refused, image-dockerfile, image-dockerfile-publish, image-gate, image-gate-must-fail, image-gate-findings, image-gate-publish, image-gate-must-fail-publish, image-gate-must-fail-publish-ko, image-gate-tags, licences, licences-js, licences-must-fail, scan, scan-must-fail, names, names-must-fail]
+    needs: [workflows, go, go-tools, web, tofu, image, image-publish, image-private-base, image-private-base-refused, image-dockerfile, image-dockerfile-publish, image-gate, image-gate-must-fail, image-gate-findings, image-gate-publish, image-gate-must-fail-publish, image-gate-must-fail-publish-ko, image-gate-tags, licences, licences-js, licences-must-fail, licences-rust, licences-rust-must-fail, scan, scan-must-fail, names, names-must-fail]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
