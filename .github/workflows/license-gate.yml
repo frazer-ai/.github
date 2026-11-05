@@ -200,11 +200,16 @@ jobs:
 
           sbom = json.loads(Path("sbom.cdx.json").read_text())
           rows, violations = set(), 0
-          # One list: a caller's rust/deny.toml allows nothing this gate does not.
-          deny = wd / "rust" / "deny.toml"
-          if deny.is_file():
+          # One list: crates are cargo-deny's to check (below), so each Cargo.lock in the
+          # tree needs a deny.toml beside it, allowing nothing this gate does not.
+          for lock in wd.rglob("Cargo.lock"):
+              deny = lock.with_name("deny.toml")
+              if not deny.is_file():
+                  print(f"::error title=No licence policy::{lock} has no deny.toml beside it, so nothing checks its crates' licences")
+                  violations += 1
+                  continue
               for name in sorted(set(tomllib.loads(deny.read_text()).get("licenses", {}).get("allow", [])) - allow):
-                  print(f"::error title=Licence not allowed::rust/deny.toml allows {name}, which this gate does not")
+                  print(f"::error title=Licence not allowed::{deny} allows {name}, which this gate does not")
                   violations += 1
           for c in sbom.get("components", []):
               if c.get("type") not in ("library", "framework"):
@@ -226,8 +231,9 @@ jobs:
               rows.add(f"{name} {version}: {licences or 'UNKNOWN'}")
               # Cargo.lock carries no licences and Syft looks none up, so a crate's
               # licence is cargo-deny's to check, over the same list (make rust-check in
-              # the caller; frazer's tools/rustpins holds its list to this one).
-              if c.get("purl", "").startswith("pkg:cargo/"):
+              # the caller; frazer's tools/rustpins holds its list to this one). Syft also
+              # reads crates out of binaries, and no policy stands behind those.
+              if c.get("purl", "").startswith("pkg:cargo/") and props.get("syft:package:foundBy") == "rust-cargo-lock-cataloger":
                   continue
               if f"{name}@{version}" in exceptions or f"{name}@*" in exceptions:
                   continue
