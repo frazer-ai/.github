@@ -168,16 +168,22 @@ jobs:
             fi
             echo "- \`$name\` $version (\`$pkg\`): \`$got\`" | tee -a "$GITHUB_STEP_SUMMARY"
           done < "$RUNNER_TEMP/go-check-tools"
-      # Shuffled and uncached; no retry-to-green.
+      # Shuffled and uncached; no retry-to-green. gotestsum runs go test -json,
+      # prints the tests' output as go test -v does, and writes the JSON to
+      # test-report.json as the tests run. No `tee`: the uutils tee (0.10 to
+      # 0.12) of the self-hosted runners' image aborts (exit 134, "2nd pipe
+      # should have enough spare") when the runner's user is near its
+      # fs.pipe-user-pages-soft; uutils/coreutils 366c18cf4d fixes it upstream.
       - name: go test
         env:
           RACE: ${{ inputs.race }}
           TEST_TIMEOUT: ${{ inputs.test-timeout }}
+          GOTESTSUM_VERSION: ${{ inputs.gotestsum-version }}
         run: |
-          set -o pipefail
-          flags=(-count=1 -shuffle=on -timeout "$TEST_TIMEOUT" -json)
+          flags=(-count=1 -shuffle=on -timeout "$TEST_TIMEOUT")
           if [ "$RACE" = "true" ]; then flags+=(-race); fi
-          go test "${flags[@]}" ./... | tee test-report.json
+          go run "gotest.tools/gotestsum@${GOTESTSUM_VERSION}" --format standard-verbose \
+            --jsonfile test-report.json -- "${flags[@]}" ./...
       - name: JUnit report
         if: always()
         env:
