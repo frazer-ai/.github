@@ -72,10 +72,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # No Actions cache (cache: false here and in the two jobs below). A
+      # self-hosted runner keeps Go's build and module caches from job to job,
+      # one copy its runners share, and setup-go's cache untars its saved copy
+      # over that one while other jobs read it: on 11-14 frazer's go / Test
+      # and L2 failed with go-build files missing or cut short (link: cannot
+      # open file, SIGBUS), and every job downloaded the 7 GB copy first.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ${{ inputs.working-directory }}/go.mod
-          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+          cache: false
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -91,6 +97,9 @@ jobs:
         with:
           version: ${{ inputs.golangci-lint-version }}
           working-directory: ${{ inputs.working-directory }}
+          # Its Actions cache would untar over the lint cache a self-hosted
+          # runner keeps for all its runners, as setup-go's over Go's.
+          skip-cache: true
 
   test:
     name: Test
@@ -106,7 +115,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ${{ inputs.working-directory }}/go.mod
-          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+          cache: false
       # The tests' tools, each at the version the caller's mise.toml pins, in
       # this job's own $RUNNER_TEMP/bin. A self-hosted runner keeps ~/go/bin
       # from job to job, so a tool another job left there could otherwise
@@ -218,7 +227,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ${{ inputs.working-directory }}/go.mod
-          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+          cache: false
       - name: govulncheck
         env:
           GOVULNCHECK_VERSION: ${{ inputs.govulncheck-version }}
