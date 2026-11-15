@@ -98,7 +98,12 @@ jobs:
         run: |
           set -euo pipefail
           bin="$RUNNER_TEMP/scanners"
-          mkdir -p "$bin" "$RUNNER_TEMP/trivy-cache"
+          mkdir -p "$bin"
+          # Trivy runs as this job's user, with its databases in a directory of
+          # its own: run as root, it left them root-owned in RUNNER_TEMP, which a
+          # self-hosted runner then cannot empty for the next job (on 11-14 an
+          # earlier job's half-installed Rust failed frazer's Protos job).
+          trivy_cache=$(mktemp -d "$RUNNER_TEMP/trivy-cache.XXXXXX")
           GOBIN="$bin" go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_VERSION}"
           GOBIN="$bin" go install "github.com/betterleaks/betterleaks@${BETTERLEAKS_VERSION}"
 
@@ -116,7 +121,8 @@ jobs:
           if [ "${RUNNER_DEBUG:-}" = "1" ]; then debug="-e TRIVY_DEBUG=true"; fi
           cat > "$bin/trivy" <<SH
           #!/usr/bin/env bash
-          exec docker run --rm -v "\$PWD:/src:ro" -w /src -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \\
+          exec docker run --rm --user "$(id -u):$(id -g)" -v "\$PWD:/src:ro" -w /src \\
+            -v "$trivy_cache:/trivy-cache" -e TRIVY_CACHE_DIR=/trivy-cache \\
             -e TRIVY_DB_REPOSITORY=ghcr.io/aquasecurity/trivy-db:2 \\
             -e TRIVY_JAVA_DB_REPOSITORY=ghcr.io/aquasecurity/trivy-java-db:1 \\
             -e TRIVY_CHECKS_BUNDLE_REPOSITORY=ghcr.io/aquasecurity/trivy-checks:2 \\

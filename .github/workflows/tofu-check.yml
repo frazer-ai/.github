@@ -77,7 +77,10 @@ jobs:
         run: |
           set -euo pipefail
           bin="$RUNNER_TEMP/trivy-bin"
-          mkdir -p "$bin" "$RUNNER_TEMP/trivy-cache"
+          mkdir -p "$bin"
+          # Trivy runs as this job's user, with its databases in a directory of
+          # its own, as in scan.yml (which says why).
+          trivy_cache=$(mktemp -d "$RUNNER_TEMP/trivy-cache.XXXXXX")
           image="ghcr.io/aquasecurity/trivy@${TRIVY_DIGEST}"
           cosign verify "$image" \
             --certificate-identity "https://github.com/aquasecurity/trivy/.github/workflows/reusable-release.yaml@refs/tags/v${TRIVY_VERSION}" \
@@ -91,7 +94,8 @@ jobs:
           if [ "${RUNNER_DEBUG:-}" = "1" ]; then debug="-e TRIVY_DEBUG=true"; fi
           cat > "$bin/trivy" <<SH
           #!/usr/bin/env bash
-          exec docker run --rm -v "\$PWD:/src:ro" -w /src -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \\
+          exec docker run --rm --user "$(id -u):$(id -g)" -v "\$PWD:/src:ro" -w /src \\
+            -v "$trivy_cache:/trivy-cache" -e TRIVY_CACHE_DIR=/trivy-cache \\
             -e TRIVY_DB_REPOSITORY=ghcr.io/aquasecurity/trivy-db:2 \\
             -e TRIVY_JAVA_DB_REPOSITORY=ghcr.io/aquasecurity/trivy-java-db:1 \\
             -e TRIVY_CHECKS_BUNDLE_REPOSITORY=ghcr.io/aquasecurity/trivy-checks:2 \\
