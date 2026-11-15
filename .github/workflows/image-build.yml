@@ -302,11 +302,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # No Actions cache: a self-hosted runner keeps Go's caches, shared by its
+      # runners, and setup-go would untar its saved copy over them while other
+      # jobs read them (go-check.yml says what that broke).
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: inputs.dockerfile == ''
         with:
           go-version-file: ${{ inputs.working-directory }}/go.mod
-          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+          cache: false
       # ko from source that the Go checksum database verifies, as crane and
       # Grype below, into this job's own $RUNNER_TEMP, emptied first since a
       # self-hosted runner can keep an earlier job's. setup-ko untarred its
